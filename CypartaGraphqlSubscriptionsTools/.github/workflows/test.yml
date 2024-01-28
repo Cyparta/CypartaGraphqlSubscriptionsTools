@@ -1,0 +1,15 @@
+name: Tests
+on: push
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@master
+    - uses: actions/setup-python@v1
+      with:
+        python-version: '3.7'
+    - run: curl -sSL https://raw.githubusercontent.com/sdispater/poetry/master/get-poetry.py | python
+    - run: $HOME/.poetry/bin/poetry install -v
+    - run: $HOME/.poetry/bin/poetry run pytest tests/
