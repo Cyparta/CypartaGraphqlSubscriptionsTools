@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Daphne",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/eslam/.local/bin/daphne",  // Replace with the correct path
+            "args": [
+                "-b",
+                "0.0.0.0",
+                "-p",
+                "8000",
+                
+                "project.asgi:application",
+                
+                
+               
+            ],
+            "django": true,
+            "justMyCode": true,
+            // "env": {
+            //     "DJANGO_SETTINGS_MODULE": "helper.settings",
+            //     "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/helper",
+            //     "DEBUG": "1",
+            // },
+        }
+    ]
+}

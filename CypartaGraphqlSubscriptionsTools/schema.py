@@ -3,7 +3,7 @@ import graphene
 from graphene_django.types import DjangoObjectType
 from CypartaGraphqlSubscriptionsTools.models import *
 from asgiref.sync import async_to_sync
-
+from .utils import get_model_name_instance
 # Define DjangoObjectType for MyModel
 class MyModelType(DjangoObjectType):
     class Meta:
@@ -13,9 +13,7 @@ class CustomType(graphene.ObjectType):
     field1 = graphene.String()
     field2 = graphene.Int()
     # Add more fields as needed
-# Helper function to get model name instance
-def get_model_name_instance(ModelType):
-    return ModelType._meta.model.__name__
+
 
 # Object type for handling subscriptions
 class MyModelCreatedSubscription(graphene.ObjectType):

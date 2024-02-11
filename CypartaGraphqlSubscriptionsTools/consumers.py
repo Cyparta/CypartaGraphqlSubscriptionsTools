@@ -1,13 +1,13 @@
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from CypartaGraphqlSubscriptionsTools.serialize import serialize_value
-from CypartaGraphqlSubscriptionsTools.schema import schema  # Import your GraphQL schema
+#from CypartaGraphqlSubscriptionsTools.schema import schema  # Import your GraphQL schema
 from reactivex.subject import Subject
 import asyncio
 import re
 from asgiref.sync import sync_to_async
 from CypartaGraphqlSubscriptionsTools.models import *
-
-
+from graphene_django.settings import graphene_settings
+from .utils import filter_requested_fields
 # use full link https://wundergraph.com/blog/quirks_of_graphql_subscriptions_sse_websockets_hasura_apollo_federation_supergraph#graphql-subscriptions-over-websockets:-subscription-transport-ws-vs-graphql-ws
 # #if we will use Sec-Websocket-Protocol: graphql-ws
 
@@ -117,6 +117,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
 
     async def execute_subscription(self, subscription, operation_name, variables, context, id):
         # Execute the GraphQL subscription and send results
+        schema = graphene_settings.SCHEMA
         result = await sync_to_async(schema.execute)(
             subscription,
             operation_name=operation_name,
@@ -168,5 +169,6 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         group = message['group']
         if group in self.groups:
             stream = self.groups[group]
-            serialized_value = await serialize_value(message['value'], self.requested_fields, group)
-            stream.on_next(AttrDict(serialized_value))
+            #serialized_value = await serialize_value(message['value'], self.requested_fields, group)
+            serialized_filter_value=filter_requested_fields(message['value'],self.requested_fields)
+            stream.on_next(AttrDict(serialized_filter_value))
