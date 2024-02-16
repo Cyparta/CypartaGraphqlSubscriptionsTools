@@ -1,0 +1,4 @@
+Django==4.2.7
+graphene==3.3
+reactivex
+django_lifecycle
