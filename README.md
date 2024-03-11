@@ -115,6 +115,7 @@ libirary use async for more beast performance
    ```python
    #your_project/schema.py
    import graphene
+   from asgiref.sync import async_to_sync
 
    from your_app.graphql.subscriptions import YourSubscription
 
