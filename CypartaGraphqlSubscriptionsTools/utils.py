@@ -7,6 +7,10 @@ def get_model_name_instance(ModelType):
 
 def filter_requested_fields(deserialized_data,requested_fields):
      
-        exposed_fields = {field: deserialized_data['fields'][field] for field in requested_fields}
+        exposed_fields = {
+            field: deserialized_data['fields'][field]
+            for field in requested_fields
+            if field in deserialized_data['fields']
+        }
         deserialized_data['fields']=exposed_fields
         return deserialized_data
