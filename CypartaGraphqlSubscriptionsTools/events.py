@@ -3,9 +3,9 @@ from django.core import serializers
 from .serialize import serialize_value
 async def trigger_subscription(group, value):
     # Print some information for debugging purposes
-    print('Value:', value)
-    print('ID:', value.id)
-    print('Group:', group)
+    # print('Value:', value)
+    # print('ID:', value.id)
+    # print('Group:', group)
     
     # Get the channel layer
     channel_layer = get_channel_layer()
@@ -15,7 +15,7 @@ async def trigger_subscription(group, value):
         group,
         {
             "type": "subscription.triggered",  # Type of the message
-            "value": await serialize_value(value),  # The value to be sent
+            "value": await serialize_value(value,group),  # The value to be sent
             "group": group  # The channel group to send the message to
         }
     )
