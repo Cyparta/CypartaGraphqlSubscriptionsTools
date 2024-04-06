@@ -332,3 +332,20 @@ from CypartaGraphqlSubscriptionsTools.events import trigger_subscription
 
 async_to_sync(trigger_subscription)(f"{model_name}Created", self)
 ```
+
+Custom middleware, such as `TokenAuthMiddleware`, can be added to provide additional functionality, such as authentication or permission checks, to WebSocket connections.
+
+
+```python
+from CypartaGraphqlSubscriptionsTools.middleware import TokenAuthMiddleware
+application = ProtocolTypeRouter({
+  "http": django_asgi_app,
+  "websocket": 
+        AuthMiddlewareStack(
+            TokenAuthMiddleware(
+            URLRouter(
+                CypartaGraphqlSubscriptionsTools.routing.websocket_urlpatterns
+            )
+        ))
+    
+})
