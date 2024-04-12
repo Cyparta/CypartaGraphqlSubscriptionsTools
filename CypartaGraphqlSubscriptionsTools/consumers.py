@@ -64,6 +64,9 @@ class DetectWebSocketType(AsyncJsonWebsocketConsumer):
             await asyncio.sleep(self.ping_interval)
 
     async def _send_result(self, id, result):
+        errors = result.errors
+        #xx=list(map(errors.formatted, errors))
+        formatted_errors = [error.formatted for error in errors] if errors else None
         # Send subscription results back to the client
         await self.send_json(
             {
@@ -71,6 +74,7 @@ class DetectWebSocketType(AsyncJsonWebsocketConsumer):
                 "type": self.result_command,
                 "payload": {
                     "data": result.data,
+                    "errors": formatted_errors 
                 },
             }
         )

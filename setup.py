@@ -4,7 +4,7 @@ import setuptools
 
 setuptools.setup(
     name="cypartagraphqlsubscriptionstools",
-    version="1.0.0",
+    version="1.1.0",
     description = "A CypartaGraphqlSubscriptionsTools implementation for Graphene + Django built using Django Channels +reactive programming in python (RxPY) . Provides support for model creation, mutation and deletion,and get data with websocket or path list of events name for subscriptions .",
     long_description=pathlib.Path("README.md").read_text(),
     long_description_content_type="text/markdown",

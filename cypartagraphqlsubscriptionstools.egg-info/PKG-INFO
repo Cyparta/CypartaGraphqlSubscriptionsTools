@@ -1,11 +1,12 @@
 Metadata-Version: 2.1
 Name: cypartagraphqlsubscriptionstools
-Version: 1.0.0
+Version: 1.1.0
 Summary: A CypartaGraphqlSubscriptionsTools implementation for Graphene + Django built using Django Channels +reactive programming in python (RxPY) . Provides support for model creation, mutation and deletion,and get data with websocket or path list of events name for subscriptions .
 Home-page: https://cyparta.com/
 Author: Cyparta Software House
 Author-email: Support@cyparta.com
 License: LICENSE
+Project-URL: homepage, https://cyparta.com/
 Project-URL: Documentation, https://github.com/Cyparta/CypartaGraphqlSubscriptionsTools
 Project-URL: Source, https://github.com/Cyparta/CypartaGraphqlSubscriptionsTools
 Classifier: License :: OSI Approved :: MIT License
@@ -132,6 +133,7 @@ libirary use async for more beast performance
    ```python
    #your_project/schema.py
    import graphene
+   from asgiref.sync import async_to_sync
 
    from your_app.graphql.subscriptions import YourSubscription
 
@@ -348,3 +350,20 @@ from CypartaGraphqlSubscriptionsTools.events import trigger_subscription
 
 async_to_sync(trigger_subscription)(f"{model_name}Created", self)
 ```
+
+Custom middleware, such as `TokenAuthMiddleware`, can be added to provide additional functionality, such as authentication or permission checks, to WebSocket connections.
+
+
+```python
+from CypartaGraphqlSubscriptionsTools.middleware import TokenAuthMiddleware
+application = ProtocolTypeRouter({
+  "http": django_asgi_app,
+  "websocket": 
+        AuthMiddlewareStack(
+            TokenAuthMiddleware(
+            URLRouter(
+                CypartaGraphqlSubscriptionsTools.routing.websocket_urlpatterns
+            )
+        ))
+    
+})
