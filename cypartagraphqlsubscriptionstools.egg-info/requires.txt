@@ -1,4 +1,9 @@
 Django==4.2.7
 graphene==3.3
-reactivex
+graphene-django>=3.1
+channels
 django_lifecycle
+
+[test]
+pytest>=7.0
+pytest-asyncio>=0.21

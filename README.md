@@ -1,359 +1,307 @@
-# Graphene CypartaGraphqlSubscriptionsTools
+# CypartaGraphqlSubscriptionsTools
 
-<p>
-    <img src="https://sadakatcdn.cyparta.com/Cyparta/cover.jpg" alt="image">
-    <a href="https://twitter.com/eslamelhadedy50">
-        <img src="https://img.shields.io/twitter/follow/eslamelhadedy50?style=social&logo=twitter"
-            alt="follow on Twitter"></a>
-</p>
+Graphene + Django GraphQL **subscriptions** over **Django Channels** (async WebSockets). Supports **`graphql-transport-ws`** and **`graphql-ws`** via the `Sec-WebSocket-Protocol` header.
 
-## Introduction
+For background on the two protocols, see [GraphQL over WebSockets: subscription-transport-ws vs graphql-ws](https://wundergraph.com/blog/quirks_of_graphql_subscriptions_sse_websockets_hasura_apollo_federation_supergraph#graphql-subscriptions-over-websockets:-subscription-transport-ws-vs-graphql-ws).
 
-A CypartaGraphqlSubscriptionsTools implementation for Graphene + Django built using Django Channels +reactive programming in python (RxPY)
-. Provides support for model creation, mutation and deletion,and get data with websocket or path list of events name for subscriptions .
+---
 
-libirary support Both WebSocket Protocol graphql-transport-ws and graphql-ws
+## What you get (v4.0.2)
 
-for more info use full link : https://wundergraph.com/blog/quirks_of_graphql_subscriptions_sse_websockets_hasura_apollo_federation_supergraph#graphql-subscriptions-over-websockets:-subscription-transport-ws-vs-graphql-ws
+- **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`).
+- **Multi-operation aware** — each client `subscribe` uses a transport **`id`**; groups and payloads are keyed per operation (`_ops` / `_group_ops`).
+- **Live payload shape** — each event is sent as GraphQL `ExecutionResult` data shaped as **`{ "<responseKey>": value }`**, where **response key** is the subscription root field’s **alias** if present, otherwise the **field name** (from `graphql.parse`).
+- **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, `subscripe`) so GraphiQL-style panels see an immediate handshake.
+- **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** (django-lifecycle hooks) and **`trigger_subscription`** for channel layer broadcasts.
 
-libirary use async for more beast performance
-# CypartaGraphqlSubscriptionsTools Features
+---
 
-1. **Real-time GraphQL Subscriptions:**
-   - Enables real-time communication between GraphQL clients and servers using WebSocket connections.
+## Requirements
 
-2. **Support for Django Models:**
-   - Integrates seamlessly with Django models, providing subscriptions for model creation, update, and deletion events.
+- Python **≥ 3.9**
+- **Django**, **Graphene / graphene-django**, **Channels**, **django-lifecycle** (see `setup.py` / `requirements.txt` for pinned versions in this repo).
 
-3. **Django Subscription Model Mixin:**
-   - Powerful mixin for Django models to enable real-time GraphQL subscriptions on instance lifecycle events.
+Install:
 
-4. **Dynamic Subscription Management:**
-   - Flexible mechanism for managing subscriptions dynamically using parameters like `subscripe` and `id`.
-
-5. **WebSocket Protocol Support:**
-   - Supports both `graphql-transport-ws` and `graphql-ws` for compatibility with various GraphQL clients.
-
-6. **Async Implementation:**
-   - Leverages asynchronous programming for enhanced performance and suitability for high-concurrency applications.
-
-7. **Custom Event Support:**
-   - Allows creation of custom events and subscriptions, providing flexibility for handling events beyond Django signals.
-
-8. **Observable and Reactive Programming:**
-   - Utilizes `rxpy` for handling observables and reactive programming, enabling application of various operations on subscription streams.
-
-9. **Multi-Subscription Support:**
-   - Supports multiple subscriptions concurrently, allowing clients to subscribe to multiple events or models simultaneously.
-
-10. **Easy Integration with Graphene:**
-    - Seamless integration with the Graphene library for easy definition and management of GraphQL subscriptions.
-
-11. **Ping Mechanism:**
-    - Includes a ping mechanism to keep WebSocket connections alive and maintain communication between clients and servers.
-
-12. **WebSocket Group Management:**
-    - Provides functions for dynamically registering and unregistering WebSocket groups for organized subscription handling.
-
-13. **In-memory Channel Layer Support:**
-    - Supports an in-memory Channel Layer for development environments without the need for a dedicated Redis instance.
-
-14. **Customizable Routing:**
-    - Allows customization of WebSocket routing in Django channels, making it adaptable to various project structures.
-
-15. **Compatibility with Django Lifecycle:**
-    - Works seamlessly with the `django_lifecycle` library to leverage Django model lifecycle events.
-
-## Installation
-
-1. Install `CypartaGraphqlSubscriptionsTools`
-
-   ```bash
-   $ pip install django_lifecycle
-   $ pip install CypartaGraphqlSubscriptionsTools
-   ```
-
-2. Add `CypartaGraphqlSubscriptionsTools` to `INSTALLED_APPS`:
-
-   ```python
-   # your_project/settings.py
-   INSTALLED_APPS = [
-       # ...
-       'CypartaGraphqlSubscriptionsTools'
-   ]
-   ```
-
-3. Add Django Channels to your project (see: [Django Channels installation docs](https://channels.readthedocs.io/en/latest/installation.html)) and set up [Channel Layers](https://channels.readthedocs.io/en/latest/topics/channel_layers.html). If you don't want to set up a Redis instance in your dev environment yet, you can use the in-memory Channel Layer:
-
-   ```python
-   # your_project/settings.py
-   CHANNEL_LAYERS = {
-       "default": {
-           "BACKEND": "channels.layers.InMemoryChannelLayer"
-       }
-   }
-   ```
-
-4. Add `CypartaGraphqlSubscriptionsConsumer` to your `routing.py` file.
-
-   ```python
-   # your_project/routing.py
-   from channels.routing import ProtocolTypeRouter, URLRouter
-   from django.urls import path
-
-   from CypartaGraphqlSubscriptionsTools.consumers import CypartaGraphqlSubscriptionsConsumer
-
-   application = ProtocolTypeRouter({
-       "websocket": URLRouter([
-           path('graphql/', CypartaGraphqlSubscriptionsConsumer)
-       ]),
-   })
-   ```
-
-5. Define your subscriptions and connect them to your project schema
-
-   ```python
-   #your_project/schema.py
-   import graphene
-   from asgiref.sync import async_to_sync
-
-   from your_app.graphql.subscriptions import YourSubscription
-
-
-   class Query(graphene.ObjectType):
-       base = graphene.String()
-
-
-   class Subscription(YourSubscription):
-       pass
-
-
-   schema = graphene.Schema(
-       query=Query,
-       subscription=Subscription
-   )
-   ```
-
-## Django Subscription Model Mixin
-
-The Django Subscription Model Mixin is a powerful tool that seamlessly integrates with Django models to enable real-time GraphQL subscriptions when model instances are created, updated, or deleted. This mixin leverages the `django_lifecycle` library for managing model lifecycle events and the `CypartaGraphqlSubscriptionsTools` library for triggering GraphQL subscriptions.
-
-### Usage
-
-1. **Inherit from the `CypartaSubscriptionModelMixin` in Your Django Model:**
-
-    ```python
-    # your_project/models.py
-    from CypartaGraphqlSubscriptionsTools.mixins import CypartaSubscriptionModelMixin
-
-    class YourModel(CypartaSubscriptionModelMixin, models.Model):
-        # Your model fields and methods go here
-    ```
-
-Replace `YourModel` with the actual name of your model. This mixin provides hooks for triggering subscriptions on model lifecycle events, such as creation, update, and deletion.
-
-## Defining Subscriptions
-
-Subscriptions in Graphene are defined as normal `ObjectType`'s. Each subscription field resolver must return an observable which emits values matching the field's type.
-
-A simple hello world subscription (which returns the value `"hello world!"` every 3 seconds) could be defined as follows:
-
-```python
-import graphene
-from rx import Observable
-
-class Subscription(graphene.ObjectType):
-    hello = graphene.String()
-
-    def resolve_hello(root, info):
-        return Observable.interval(3000) \
-                         .map(lambda i: "hello world!")
+```bash
+pip install cypartagraphqlsubscriptionstools
 ```
 
-## Responding to Model Events
+Or from source:
 
-Each subscription that you define will receive a an `Consumer` of `CypartaGraphqlSubscriptionsConsumer`'s as the `root` parameter, which will subscripe or cancel by `detect_register_group_status` function  .
-
-
-
-
-### Model Created Subscriptions
-
-This code snippet demonstrates how to implement GraphQL subscriptions for Django models using the CypartaGraphqlSubscriptionsTools library. In this example, a subscription named `mymodelcreated` is defined to trigger events whenever a new instance of the `MyModel` Django model is created. The `subscripe` parameter is introduced, allowing for dynamic subscription management by providing a boolean value (`True` to subscribe, `False` to cancel subscription).
-
-# Code Explanation
--**GraphQL Type Definition**: The code defines a GraphQL type YourModelType using graphene and graphene_django.types.DjangoObjectType for the MyModel Django model.
-
--**Subscription Definition**: The Subscription class extends graphene.ObjectType and includes a subscription field named `get_my_model`. This field is associated with the MyModelType and includes the subscripe parameter to manage subscription status.
-
--**Subscription Resolver Logic**: The resolve_my_model_created function handles the resolution logic for the `get_my_model` subscription. It dynamically extracts requested fields from the GraphQL query using info.field_nodes and filters for the relevant fields. The event name is constructed based on the model name and the event type (`{model_name}Created`). The resolution logic is then delegated to the `detect_register_group_status` function.
-
-Event Triggering: The event is triggered whenever a new instance of `MyModel` is created, leveraging the signals provided by `django_lifecycle`.
-
-```python
-import graphene
-from graphene_django.types import DjangoObjectType
-from CypartaGraphqlSubscriptionsTools.events import CREATED
-
-from your_app.models import MyModel
-
-
-class YourModelType(DjangoObjectType)
-    class Meta:
-        model = MyModel
-
-
-class Subscription(graphene.ObjectType):
-    get_my_model = graphene.Field(MyModelType, subscripe=graphene.Boolean())
-
-    # Resolve function for handling 'get_my_model' based on 'subscripe'
-    def resolve_get_my_model(root, info, subscripe):
-        requested_fields = [field.name.value for field in info.field_nodes[0].selection_set.selections]
-        model_name = get_model_name_instance(MyModelType)
-        return async_to_sync(root.detect_register_group_status)([f'{model_name}Created'], subscripe, requested_fields)
-
+```bash
+pip install -e .
 ```
 
-### Model Updated Subscriptions
+---
 
-You can also filter events based on a subscription's arguments. For example, here's a subscription that fires whenever a model is updated:
+## 1. Install and enable the app
+
+Add the app to **`INSTALLED_APPS`**:
 
 ```python
-import graphene
-from graphene_django.types import DjangoObjectType
-from CypartaGraphqlSubscriptionsTools.events import UPDATED
-
-from your_app.models import MyModel
-
-
-class YourModelType(DjangoObjectType)
-    class Meta:
-        model = MyModel
-
-
-class Subscription(graphene.ObjectType):
-    my_model_updated = graphene.Field(MyModelType, id=graphene.String(), subscripe=graphene.Boolean())
-
-    # Resolve function for handling 'my_model_updated' based on 'subscripe' and 'id'
-    def resolve_my_model_updated(root, info, subscripe, id):
-        model_name = get_model_name_instance(MyModelType)
-        return async_to_sync(root.detect_register_group_status)([f'{model_name}Updated.{id}'], subscripe)
+# settings.py
+INSTALLED_APPS = [
+    # ...
+    "channels",
+    "CypartaGraphqlSubscriptionsTools",
+]
 ```
 
-### Model Created Updated Deleted Subscriptions
-
-You can also filter events based on a subscription's arguments. For example, here's a subscription that fires whenever a model is updated:
+Configure **channel layers** (Redis for production; in-memory is fine for local dev):
 
 ```python
-import graphene
-from graphene_django.types import DjangoObjectType
-from CypartaGraphqlSubscriptionsTools.events import UPDATED
-
-from your_app.models import MyModel
-
-
-class YourModelType(DjangoObjectType)
-    class Meta:
-        model = MyModel
-
-
-class Subscription(graphene.ObjectType):
-    my_model_created_update_delete = graphene.Field(MyModelType, subscripe=graphene.Boolean(), id=graphene.String())
-
-    # Resolve function for handling create, update, delete operations based on 'subscripe' and 'id'
-    def resolve_my_model_created_update_delete(root, info, subscripe, id):
-        requested_fields = [field.name.value for field in info.field_nodes[0].selection_set.selections]
-        model_name = get_model_name_instance(MyModelType)
-        groups = [f'{model_name}Created', f'{model_name}Updated.{id}', f'{model_name}Deleted.{id}']
-        if id == "":
-            groups = [f'{model_name}Created']
-
-        return async_to_sync(root.detect_register_group_status)(groups, subscripe, requested_fields)
-
-
+# settings.py
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    },
+}
 ```
 
-### Model Deleted Subscriptions
-
-Defining a subscription that is fired whenever a given model instance is deleted can be accomplished like so
+Optional:
 
 ```python
-import graphene
-from graphene_django.types import DjangoObjectType
-from CypartaGraphqlSubscriptionsTools.events import DELETED
-
-from your_app.models import MyModel
-
-
-class YourModelType(DjangoObjectType)
-    class Meta:
-        model = MyModel
-
-
-class Subscription(graphene.ObjectType):
-    my_model_deleted = graphene.Field(MyModelType, id=graphene.String(), subscripe=graphene.Boolean())
-
-    # Resolve function for handling 'my_model_deleted' based on 'subscripe' and 'id'
-    def resolve_my_model_deleted(root, info, subscripe, id):
-        model_name = get_model_name_instance(MyModelType)
-        return async_to_sync(root.detect_register_group_status)([f'{model_name}Deleted.{id}'], subscripe)
+# Max queued outbound messages per WebSocket before drops (default 256).
+CYPARTA_WS_OUTBOX_MAXSIZE = 512
 ```
 
-## Custom Events
+Point **`ASGI_APPLICATION`** at your routing module (see below).
 
-To create a custom type in GraphQL using Graphene, you need to define a new class for your custom type by extending `graphene.ObjectType`. Let's say you want to create a custom type named `CustomType`. Here's an example:
-```python
+---
 
-import graphene
+## 2. Wire ASGI and WebSocket routing
 
-class CustomType(graphene.ObjectType):
-    # Define fields for your custom type
-    field1 = graphene.String()
-    field2 = graphene.Int()
-    # Add more fields as needed
+Mount **`CypartaGraphqlSubscriptionsConsumer`** on a URL your GraphQL WS client will use.
 
-```
-In this example, `CustomType` has two fields: `field1` of type `graphene.String()` and `field2` of type `graphene.Int()`. You can customize the fields based on the data you want to include in your custom type.
-
-Now, you can use this `CustomType` in your `my_custom_event` subscription:
+**Option A — reuse the package URL patterns**
 
 ```python
-import graphene
+# your_project/routing.py
+from channels.routing import URLRouter
+from django.urls import path
 
-my_custom_event = graphene.Field(CustomType)
+from CypartaGraphqlSubscriptionsTools.routing import websocket_urlpatterns
 
-def resolve_my_custom_event(root, info, subscripe):
-    return async_to_sync(root.detect_register_group_status)(['custom_event'], subscripe)
-
-
-
-# elsewhere in your app:
-from CypartaGraphqlSubscriptionsTools.events import trigger_subscription
-
-async_to_sync(trigger_subscription)(f"{model_name}Created", self)
+# Or merge with your own patterns:
+urlpatterns_websocket = [
+    *websocket_urlpatterns,
+    # path("ws/other/", OtherConsumer.as_asgi()),
+]
 ```
 
-Custom middleware, such as `TokenAuthMiddleware`, can be added to provide additional functionality, such as authentication or permission checks, to WebSocket connections.
-
+**Option B — single explicit path**
 
 ```python
-from CypartaGraphqlSubscriptionsTools.middleware import TokenAuthMiddleware
+from django.urls import path
+from CypartaGraphqlSubscriptionsTools.consumers import CypartaGraphqlSubscriptionsConsumer
+
+websocket_urlpatterns = [
+    path("graphql/", CypartaGraphqlSubscriptionsConsumer.as_asgi()),
+]
+```
+
+**ASGI entry** (typical pattern):
+
+```python
+# your_project/asgi.py
+import os
+
+from channels.auth import AuthMiddlewareStack
+from channels.routing import ProtocolTypeRouter, URLRouter
+from django.core.asgi import get_asgi_application
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "your_project.settings")
+django_asgi_app = get_asgi_application()
+
+from your_project.routing import urlpatterns_websocket  # adjust import
+
 application = ProtocolTypeRouter({
-  "http": django_asgi_app,
-  "websocket": 
-        AuthMiddlewareStack(
-            TokenAuthMiddleware(
-            URLRouter(
-                CypartaGraphqlSubscriptionsTools.routing.websocket_urlpatterns
-            )
-        ))
-    
+    "http": django_asgi_app,
+    "websocket": AuthMiddlewareStack(URLRouter(urlpatterns_websocket)),
 })
 ```
 
-## Upgrading to 2.0.0
+```python
+# settings.py
+ASGI_APPLICATION = "your_project.asgi.application"
+```
 
-- **Per-socket state:** `groups` is created in `connect()` on each consumer instance (no shared class dict).
-- **Channel payloads:** implement **`adapt_channel_event`** or **`CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER`** to turn `{pk, fields, …}` into a proper `ExecutionResult` for your subscription field(s). See **`CHANGELOG.md`**.
-- **Registration ack:** read **`payload.extensions.cyparta`** instead of ad-hoc `payload.data` for register/unregister confirmations.
-- **Legacy:** `CYPARTA_LEGACY_SUBSCRIPTION_DATA = True` restores putting the raw dict on `payload.data` (for transitional clients only).
+---
+
+## 3. Point Graphene at your schema
+
+The consumer runs subscriptions with **`graphene_settings.SCHEMA`**:
+
+```python
+# settings.py
+GRAPHENE = {
+    "SCHEMA": "your_project.schema.schema",
+}
+```
+
+```python
+# your_project/schema.py
+import graphene
+
+from your_app.graphql.subscriptions import Subscription as AppSubscription
+
+
+class Query(graphene.ObjectType):
+    hello = graphene.String()
+
+    def resolve_hello(self, info):
+        return "world"
+
+
+class Subscription(AppSubscription):
+    pass
+
+
+schema = graphene.Schema(query=Query, subscription=Subscription)
+```
+
+---
+
+## 4. WebSocket protocol (what the client must do)
+
+1. **Negotiate subprotocol** — the handshake must include **`Sec-WebSocket-Protocol: graphql-transport-ws`** or **`graphql-ws`**. Unsupported values are rejected with close code **`1002`**.
+2. **`connection_init`** — send first; the server replies with **`connection_ack`** and only then accepts **`subscribe`**.
+3. **`subscribe`** — must include a string **`id`** (GraphQL transport operation id). If **`subscribe`** arrives before **`connection_init`**, the socket is closed with **`4401`**.
+4. **`complete`** — may be sent even before **`connection_init`** only when an **`id`** is present; the server tears down that operation and sends **`{"type": "complete", "id": "<id>"}`** when applicable.
+
+Ping / keepalive: the server periodically sends **`ping`** (transport-ws) or **`ka`** (graphql-ws).
+
+---
+
+## 5. Writing subscription resolvers
+
+Inside a subscription resolver, **`root`** is the **`CypartaGraphqlSubscriptionsConsumer`** instance. Join or leave channel groups with **`detect_register_group_status`**. Because the consumer is async, call it from sync Graphene code with **`async_to_sync`**:
+
+```python
+from asgiref.sync import async_to_sync
+from CypartaGraphqlSubscriptionsTools.utils import get_model_name_instance
+```
+
+Typical pattern:
+
+```python
+async_to_sync(root.detect_register_group_status)(
+    name_list,           # e.g. ["MyModelCreated"]
+    subscripe,           # True = join groups, False = leave
+    requested_fields,    # optional list of field names for payload filtering, or None
+    operation_id=None,   # optional; omit during normal subscribe execution (uses active op id)
+)
+```
+
+**`requested_fields`** — when not `None`, only those keys are kept under the serialized `fields` dict in the pushed payload (see `filter_requested_fields` in `utils.py`).
+
+**Group names** — align with what you pass to **`trigger_subscription`** (see below). The mixin uses:
+
+- `{ModelName}Created`
+- `{ModelName}Updated.{pk}`
+- `{ModelName}Deleted.{pk}`
+
+### Example: model created
+
+```python
+import graphene
+from asgiref.sync import async_to_sync
+from graphene_django.types import DjangoObjectType
+
+from CypartaGraphqlSubscriptionsTools.utils import get_model_name_instance
+from your_app.models import MyModel
+
+
+class MyModelType(DjangoObjectType):
+    class Meta:
+        model = MyModel
+
+
+class Subscription(graphene.ObjectType):
+    my_model_created = graphene.Field(MyModelType, subscripe=graphene.Boolean(required=True))
+
+    def resolve_my_model_created(root, info, subscripe):
+        requested_fields = [
+            s.name.value for s in info.field_nodes[0].selection_set.selections
+        ]
+        model_name = get_model_name_instance(MyModelType)
+        return async_to_sync(root.detect_register_group_status)(
+            [f"{model_name}Created"],
+            subscripe,
+            requested_fields,
+        )
+```
+
+Use the same idea for **`Updated` / `Deleted`** with groups like `f"{model_name}Updated.{id}"` (match your client arguments and your **`trigger_subscription`** calls).
+
+---
+
+## 6. Model mixin (optional)
+
+Subclass **`CypartaSubscriptionModelMixin`** so creates / updates / deletes emit channel events (requires **django-lifecycle** on the model):
+
+```python
+# your_app/models.py
+from django.db import models
+from CypartaGraphqlSubscriptionsTools.mixins import CypartaSubscriptionModelMixin
+
+
+class Article(CypartaSubscriptionModelMixin, models.Model):
+    title = models.CharField(max_length=200)
+```
+
+---
+
+## 7. Publishing events from your code
+
+Use **`trigger_subscription`** to send a message to everyone in a channel group. Values that are **`models.Model`** instances are passed through **`serialize_value`** (JSON serialize + shape with `pk`, `fields`, optional `group`):
+
+```python
+from asgiref.sync import async_to_sync
+from CypartaGraphqlSubscriptionsTools.events import trigger_subscription
+
+
+async_to_sync(trigger_subscription)("MyModelCreated", instance)
+```
+
+Custom group names work as long as subscription resolvers register the same strings.
+
+---
+
+## 8. Optional WebSocket auth middleware
+
+The package includes **`TokenAuthMiddleware`** (`Authorization: Token <key>` → sets `scope["user"]`). It expects **Django REST framework**’s **`Token`** model to be available if you use it:
+
+```python
+# asgi.py (excerpt)
+from channels.auth import AuthMiddlewareStack
+from channels.routing import URLRouter
+
+from CypartaGraphqlSubscriptionsTools.middleware import TokenAuthMiddleware
+from your_project.routing import urlpatterns_websocket
+
+application = ProtocolTypeRouter({
+    "http": django_asgi_app,
+    "websocket": AuthMiddlewareStack(
+        TokenAuthMiddleware(URLRouter(urlpatterns_websocket))
+    ),
+})
+```
+
+---
+
+## 9. Upgrading from older releases
+
+- **RxPY removed** — delivery uses a bounded queue + sender task.
+- **Adapter settings removed** — no `CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER`, `CYPARTA_LEGACY_SUBSCRIPTION_DATA`, or `adapt_channel_event`.
+- **Register / unregister acks (v4.0.2+)** — restored as **`data: null`** + **`extensions.cyparta`** on the outbox (not mixed into Option B **`data`**). **`complete`** still ends an operation.
+- **Subscribe must include `id`**; **`connection_init`** before **`subscribe`** is enforced (**`4401`** if violated).
+- **Payload data** uses **`{ responseKey: ... }`** (alias-aware) for live subscription events.
+
+---
+
+## Links
+
+- [Django Channels installation](https://channels.readthedocs.io/en/latest/installation.html)
+- [Channel layers](https://channels.readthedocs.io/en/latest/topics/channel_layers.html)

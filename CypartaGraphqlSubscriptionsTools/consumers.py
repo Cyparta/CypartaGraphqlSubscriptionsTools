@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
-import re
+from collections import defaultdict
+from contextlib import suppress
+from dataclasses import dataclass, field
 
 from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+from django.conf import settings
 from graphene_django.settings import graphene_settings
-from graphql import ExecutionResult
-from reactivex.subject import Subject
+from graphql import ExecutionResult, parse
+from graphql.language import OperationType
+from graphql.language.ast import FieldNode, OperationDefinitionNode
 
 from CypartaGraphqlSubscriptionsTools.models import *
 
@@ -18,6 +21,94 @@ from .utils import filter_requested_fields
 logger = logging.getLogger(__name__)
 
 # https://wundergraph.com/blog/quirks_of_graphql_subscriptions_sse_websockets_hasura_apollo_federation_supergraph#graphql-subscriptions-over-websockets:-subscription-transport-ws-vs-graphql-ws
+
+
+def _field_node_response_key(sel: FieldNode) -> str:
+    """GraphQL response key: alias if present, else field name."""
+    return sel.alias.value if sel.alias else sel.name.value
+
+
+def _first_root_field_key(defn: OperationDefinitionNode) -> str | None:
+    if not defn.selection_set:
+        return None
+    for sel in defn.selection_set.selections:
+        if isinstance(sel, FieldNode):
+            return _field_node_response_key(sel)
+    return None
+
+
+def resolve_subscription_response_key(
+    query: str, operation_name: str | None
+) -> str | None:
+    """
+    Option B response key for the subscription (alias or field name).
+
+    Expect one subscription operation per ``subscribe`` message. If the document
+    contains several, ``operationName`` must match exactly one operation definition
+    name or we log an error and return ``None``.
+    """
+    try:
+        doc = parse(query)
+    except Exception:
+        logger.exception("subscription query parse failed")
+        return None
+
+    subs = [
+        d
+        for d in doc.definitions
+        if isinstance(d, OperationDefinitionNode)
+        and d.operation == OperationType.SUBSCRIPTION
+    ]
+    if not subs:
+        return None
+
+    if len(subs) == 1:
+        defn = subs[0]
+    else:
+        if not operation_name:
+            logger.error(
+                "Multiple subscription operations in one document require operationName"
+            )
+            return None
+        matching = [
+            d for d in subs if d.name and d.name.value == operation_name
+        ]
+        if len(matching) != 1:
+            logger.error(
+                "operationName must identify exactly one subscription when multiple are present (name=%r)",
+                operation_name,
+            )
+            return None
+        defn = matching[0]
+
+    key = _first_root_field_key(defn)
+    if key is None:
+        logger.error("Subscription operation has no field selection")
+    return key
+
+
+def subscription_root_field_from_query(query: str, fallback: str) -> str:
+    """Best-effort first subscription root response key, or ``fallback`` if parse fails."""
+    try:
+        key = resolve_subscription_response_key(query, None)
+        if key is not None:
+            return key
+        return fallback
+    except Exception:
+        return fallback
+
+
+@dataclass(frozen=True)
+class OutboundMessage:
+    operation_id: str | None
+    result: ExecutionResult
+
+
+@dataclass
+class OperationState:
+    requested_fields: list | None
+    groups: set[str] = field(default_factory=set)
+    subscription_field_name: str | None = None
 
 
 class AttrDict:
@@ -35,6 +126,8 @@ class DetectWebSocketType(AsyncJsonWebsocketConsumer):
     ping_interval = 10
 
     async def connect(self):
+        self._ws_accepted = False
+        self._connection_acknowledged = False
         headers_dict = dict(self.scope.get("headers", []))
         sec_websocket_protocol = headers_dict.get(
             b"sec-websocket-protocol", b""
@@ -50,22 +143,36 @@ class DetectWebSocketType(AsyncJsonWebsocketConsumer):
             self.start_command = "start"
             self.result_command = "data"
             self.end_command = "stop"
+        else:
+            await self.close(code=1002)
+            return
 
         await self.accept(subprotocol=sec_websocket_protocol)
+        self._ws_accepted = True
 
         self.ping_task = asyncio.ensure_future(self.send_ping())
 
     async def disconnect(self, close_code):
-        await self.send_json({"type": "websocket.close", "code": 1000})
-        for group in getattr(self, "groups", {}):
-            await self.channel_layer.group_discard(group, self.channel_name)
         if hasattr(self, "ping_task"):
             self.ping_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.ping_task
 
     async def send_ping(self):
         while True:
-            await self.send_json({"type": self.ping_command})
-            await asyncio.sleep(self.ping_interval)
+            try:
+                await self.send_json({"type": self.ping_command})
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception(
+                    "websocket ping send failed; stopping ping loop (disconnect in progress or transport closed)"
+                )
+                break
+            try:
+                await asyncio.sleep(self.ping_interval)
+            except asyncio.CancelledError:
+                break
 
     async def _send_result(self, id, result: ExecutionResult):
         if not isinstance(result, ExecutionResult):
@@ -94,74 +201,145 @@ class DetectWebSocketType(AsyncJsonWebsocketConsumer):
 
 class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
     """
-    GraphQL subscriptions over Channels.
+    GraphQL subscriptions over Channels (production-oriented).
 
-    **v2 changes**
-    - ``groups`` is per WebSocket connection (set in :meth:`connect`), not a class attribute.
-    - Channel events are mapped with :meth:`adapt_channel_event` and only
-      ``graphql.ExecutionResult`` is sent (no raw ``AttrDict`` as ``data``).
-    - Registration ack uses ``extensions.cyparta`` (``data`` is ``null``).
-
-    Optional Django settings:
-
-    - ``CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER``: dotted path to async callable
-      ``(consumer, operation_id, group, value, requested_fields) -> ExecutionResult | None``.
-    - ``CYPARTA_LEGACY_SUBSCRIPTION_DATA``: if ``True``, default adapter puts the
-      serialized dict on ``data`` (legacy wire shape; not valid GraphQL field data).
+    - Bounded per-socket outbox queue + single sender task (no RxPY).
+    - Subscriptions keyed by GraphQL transport ``id`` (``_ops`` / ``_group_ops``).
+    - Live events use Option B: ``data = { "<responseKey>": serialized_value }``
+      (response key = field alias or field name).
     """
 
+    outbound_dropped_total: int = 0
+
     async def connect(self):
+        maxsize = int(getattr(settings, "CYPARTA_WS_OUTBOX_MAXSIZE", 256) or 256)
+        self._outbox: asyncio.Queue[OutboundMessage] = asyncio.Queue(maxsize=maxsize)
+        self._sender_task: asyncio.Task | None = None
+        self._group_ops: dict[str, set[str]] = defaultdict(set)
+        self._ops: dict[str, OperationState] = {}
+        self._active_operation_id: str | None = None
+        self._active_subscription_field_name: str | None = None
+        self._outbound_dropped = 0
         self.groups = {}
         self.requested_fields = None
+        self.name = None
         await super().connect()
+        if getattr(self, "_ws_accepted", False):
+            self._sender_task = asyncio.create_task(self._outbox_sender())
 
-    async def adapt_channel_event(self, operation_id, group, value, requested_fields):
-        """Resolve channel payload → ``ExecutionResult``. Override or set ``CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER``."""
-        from django.conf import settings
-        from django.utils.module_loading import import_string
-
-        path = getattr(settings, "CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER", None) or ""
-        path = str(path).strip()
-        if path:
-            return await import_string(path)(
-                self, operation_id, group, value, requested_fields
+    def _resolve_operation_id(self, explicit: str | None) -> str:
+        op = explicit if explicit is not None else self._active_operation_id
+        if not op:
+            raise ValueError(
+                "CypartaGraphqlSubscriptionsTools: operation_id is required "
+                "(pass operation_id=... or rely on subscribe execution context)."
             )
-        return await self.default_adapt_channel_event(
-            operation_id, group, value, requested_fields
-        )
+        return str(op)
 
-    async def default_adapt_channel_event(
-        self, operation_id, group, value, requested_fields
-    ):
-        from django.conf import settings
+    async def _outbox_sender(self) -> None:
+        while True:
+            try:
+                msg = await self._outbox.get()
+            except asyncio.CancelledError:
+                break
+            try:
+                await self._send_result(msg.operation_id, msg.result)
+            except Exception:
+                logger.exception("outbox_send_failed operation_id=%s", msg.operation_id)
+            finally:
+                self._outbox.task_done()
 
-        if getattr(settings, "CYPARTA_LEGACY_SUBSCRIPTION_DATA", False):
-            return ExecutionResult(data=value, errors=None, extensions=None)
-        return ExecutionResult(
-            data=None,
-            errors=None,
-            extensions={"cypartaSubscriptionEvent": value},
-        )
+    def _enqueue(self, operation_id: str | None, result: ExecutionResult) -> None:
+        try:
+            self._outbox.put_nowait(
+                OutboundMessage(operation_id=operation_id, result=result)
+            )
+        except asyncio.QueueFull:
+            self._outbound_dropped += 1
+            type(self).outbound_dropped_total += 1
+            logger.warning(
+                "subscription outbox full; dropped event operation_id=%s (per_connection=%s)",
+                operation_id,
+                self._outbound_dropped,
+            )
+
+    async def disconnect(self, close_code):
+        await self._teardown_connection_resources()
+        await super().disconnect(close_code)
+
+    async def _teardown_connection_resources(self) -> None:
+        if getattr(self, "_sender_task", None) is not None:
+            self._sender_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._sender_task
+            self._sender_task = None
+        for group in list(self._group_ops.keys()):
+            with suppress(Exception):
+                await self.channel_layer.group_discard(group, self.channel_name)
+        self._group_ops.clear()
+        self._ops.clear()
+        self.groups = {}
 
     async def detect_register_group_status(
-        self, name_list, subscripe=True, requested_fields=None
+        self,
+        name_list,
+        subscripe=True,
+        requested_fields=None,
+        operation_id=None,
     ):
         if subscripe:
-            await self.register_group(name_list, subscripe, requested_fields)
+            await self.register_group(
+                name_list, subscripe, requested_fields, operation_id=operation_id
+            )
         else:
-            await self.un_register_group(name_list, subscripe)
+            await self.un_register_group(
+                name_list, subscripe, operation_id=operation_id
+            )
 
-    async def register_group(self, name_list, subscripe, requested_fields=None):
-        self.requested_fields = requested_fields
-        stream = Subject()
+    async def register_group(
+        self,
+        name_list,
+        subscripe,
+        requested_fields=None,
+        operation_id=None,
+    ):
+        if not subscripe:
+            await self.un_register_group(
+                name_list, subscripe, operation_id=operation_id
+            )
+            return
+
+        op_id = self._resolve_operation_id(operation_id)
+        if op_id not in self._ops:
+            self._ops[op_id] = OperationState(
+                requested_fields=list(requested_fields) if requested_fields else None,
+                groups=set(),
+                subscription_field_name=self._active_subscription_field_name,
+            )
+        state = self._ops[op_id]
+        if self._active_subscription_field_name:
+            state.subscription_field_name = self._active_subscription_field_name
+        if requested_fields:
+            if state.requested_fields:
+                state.requested_fields = list(
+                    set(state.requested_fields) | set(requested_fields)
+                )
+            else:
+                state.requested_fields = list(requested_fields)
+
+        self.requested_fields = state.requested_fields
+
         for name in name_list:
-            self.name = name
-            if self.name not in self.groups:
-                self.groups[self.name] = stream
-                await self.channel_layer.group_add(self.name, self.channel_name)
+            if name not in state.groups:
+                state.groups.add(name)
+                await self.channel_layer.group_add(name, self.channel_name)
+            self._group_ops[name].add(op_id)
 
-        await self._send_result(
-            self.id,
+        self.name = name_list[-1] if name_list else None
+        self.groups = {g: True for g in state.groups}
+
+        self._enqueue(
+            op_id,
             ExecutionResult(
                 data=None,
                 errors=None,
@@ -175,14 +353,22 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             ),
         )
 
-    async def un_register_group(self, name_list, subscripe):
+    async def un_register_group(
+        self, name_list, subscripe, operation_id=None
+    ):
+        op_id = self._resolve_operation_id(operation_id)
+        state = self._ops.get(op_id)
         for name in name_list:
-            if name in self.groups:
-                self.name = None
-                await self.channel_layer.group_discard(name, self.channel_name)
+            if state and name in state.groups:
+                state.groups.discard(name)
+            if name in self._group_ops:
+                self._group_ops[name].discard(op_id)
+                if not self._group_ops[name]:
+                    del self._group_ops[name]
+                    await self.channel_layer.group_discard(name, self.channel_name)
 
-        await self._send_result(
-            self.id,
+        self._enqueue(
+            op_id,
             ExecutionResult(
                 data=None,
                 errors=None,
@@ -196,88 +382,126 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             ),
         )
 
-    async def extract_subscriptions(self, payload):
-        query = payload["query"]
-        subscriptions_list = re.findall(
-            r"subscription (\w+) {([^}]+}\s*)}", query
-        )
-        return subscriptions_list
+    async def _complete_operation(self, operation_id: str | None) -> None:
+        if operation_id is None:
+            return
+        op_id = str(operation_id)
+        state = self._ops.get(op_id)
+        if not state:
+            return
+        for group in list(state.groups):
+            if group in self._group_ops:
+                self._group_ops[group].discard(op_id)
+                if not self._group_ops[group]:
+                    del self._group_ops[group]
+                    await self.channel_layer.group_discard(group, self.channel_name)
+        del self._ops[op_id]
+        await self.send_json({"type": "complete", "id": op_id})
 
     async def execute_subscription(
-        self, subscription, operation_name, variables, context, id
+        self,
+        query: str,
+        operation_name,
+        variables,
+        context,
+        operation_id: str | None,
+        subscription_field_name: str,
     ):
-        schema = graphene_settings.SCHEMA
-        result = await sync_to_async(schema.execute)(
-            subscription,
-            operation_name=operation_name,
-            variables=variables,
-            context=context,
-            root=self,
-        )
-        if self.name is not None:
-            self.groups[self.name].subscribe(
-                lambda data: asyncio.ensure_future(self._send_result(id, data))
-            )
-        else:
-            await self._send_result(id, result)
-
-    async def process_subscriptions(
-        self, subscriptions_list, variables, context, id
-    ):
-        for operation_name, subscription_body in subscriptions_list:
-            subscription = (
-                f"subscription {operation_name} {{{subscription_body.strip()}}}"
-            )
-            await self.execute_subscription(
-                subscription,
+        op_id = self._resolve_operation_id(operation_id)
+        self._active_operation_id = op_id
+        self._active_subscription_field_name = subscription_field_name
+        try:
+            schema = graphene_settings.SCHEMA
+            result = await sync_to_async(schema.execute)(
+                query,
                 operation_name=operation_name,
                 variables=variables,
                 context=context,
-                id=id,
+                root=self,
             )
+            state = self._ops.get(op_id)
+            if state and state.groups:
+                return
+            self._enqueue(op_id, result)
+        finally:
+            self._active_operation_id = None
+            self._active_subscription_field_name = None
 
     async def receive_json(self, request):
-        self.id = request.get("id")
         self.name = None
-        if request["type"] == "connection_init":
+        message_type = request.get("type")
+
+        if message_type == "connection_init":
             await self.send_json({"type": "connection_ack"})
-        if request["type"] == "subscribe":
+            self._connection_acknowledged = True
+
+        elif message_type == "subscribe":
+            if not getattr(self, "_connection_acknowledged", False):
+                await self.close(code=4401)
+                return
+            operation_id = request.get("id")
+            if operation_id is None:
+                logger.warning("subscribe message missing id")
+                return
+            operation_id = str(operation_id)
             payload = request["payload"]
             variables = payload.get("variables")
             operation_name = payload.get("operationName")
-            query = payload["query"]
             context = AttrDict(self.scope)
+            query = payload["query"]
 
-            subscriptions_list = await self.extract_subscriptions(payload)
-            if len(subscriptions_list) > 0:
-                await self.process_subscriptions(
-                    subscriptions_list, variables, context, self.id
+            field_key = resolve_subscription_response_key(query, operation_name)
+            if field_key is None:
+                logger.error(
+                    "subscribe rejected: could not resolve subscription response key"
                 )
-            else:
-                await self.execute_subscription(
-                    query, operation_name, variables, context, self.id
-                )
+                return
 
-        if request["type"] == "complete":
-            pass
+            await self.execute_subscription(
+                query,
+                operation_name,
+                variables,
+                context,
+                operation_id,
+                field_key,
+            )
+
+        elif message_type == "complete":
+            if request.get("id") is not None:
+                await self._complete_operation(request.get("id"))
+
+        else:
+            logger.warning(
+                "unknown or unsupported graphql-ws message type: %r",
+                message_type,
+            )
+
+    def _shallow_copy_event_value(self, raw):
+        if isinstance(raw, dict):
+            out = dict(raw)
+            fld = raw.get("fields")
+            if isinstance(fld, dict):
+                out["fields"] = dict(fld)
+            return out
+        return raw
 
     async def subscription_triggered(self, message):
         group = message["group"]
-        if group not in self.groups:
+        op_ids = self._group_ops.get(group)
+        if not op_ids:
             return
-        stream = self.groups[group]
-        raw = copy.deepcopy(message["value"])
-        serialized_value = filter_requested_fields(raw, self.requested_fields)
-        try:
-            exec_result = await self.adapt_channel_event(
-                self.id, group, serialized_value, self.requested_fields
+        for op_id in list(op_ids):
+            state = self._ops.get(op_id)
+            if not state:
+                continue
+            raw = self._shallow_copy_event_value(message["value"])
+            serialized_value = filter_requested_fields(raw, state.requested_fields)
+            key = state.subscription_field_name or "subscription"
+            self._enqueue(
+                op_id,
+                ExecutionResult(
+                    data={key: serialized_value},
+                    errors=None,
+                    extensions=None,
+                ),
             )
-        except Exception:
-            logger.exception(
-                "adapt_channel_event failed group=%s operation_id=%s",
-                group,
-                self.id,
-            )
-            return
-        if exec_result is not None:
-            stream.on_next(exec_result)

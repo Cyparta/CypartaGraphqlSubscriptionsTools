@@ -4,14 +4,14 @@ import setuptools
 
 setuptools.setup(
     name="cypartagraphqlsubscriptionstools",
-    version="2.0.0",
-    description = "A CypartaGraphqlSubscriptionsTools implementation for Graphene + Django built using Django Channels +reactive programming in python (RxPY) . Provides support for model creation, mutation and deletion,and get data with websocket or path list of events name for subscriptions .",
+    version="4.0.2",
+    description = "Graphene + Django GraphQL subscriptions over Django Channels (async WebSockets, bounded outbox, multi-operation registry).",
     long_description=pathlib.Path("README.md").read_text(),
     long_description_content_type="text/markdown",
     url="https://cyparta.com/",
     author="Cyparta Software House",
     author_email="Support@cyparta.com",
-    license="LICENSE",
+    license="MIT",
     project_urls={
         "homepage" : "https://cyparta.com/",
         "Documentation":"https://github.com/Cyparta/CypartaGraphqlSubscriptionsTools",
@@ -23,8 +23,16 @@ setuptools.setup(
     "Programming Language :: Python :: 3",
 ],
     python_requires = ">=3.9",
-    install_requires=["Django==4.2.7","graphene==3.3","reactivex","django_lifecycle"],
+    install_requires=[
+        "Django==4.2.7",
+        "graphene==3.3",
+        "graphene-django>=3.1",
+        "channels",
+        "django_lifecycle",
+    ],
     packages=setuptools.find_packages(),
     include_package_data=True,
-    
+    extras_require={
+        "test": ["pytest>=7.0", "pytest-asyncio>=0.21"],
+    },
 )

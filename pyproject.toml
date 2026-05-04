@@ -1,0 +1,5 @@
+[build-system]
+# setuptools 75+ emits Metadata-Version 2.4 with License-File; older twine/packaging
+# reject it as "unrecognized or malformed field 'license-file'" on PyPI upload.
+requires = ["setuptools>=61.0,<75", "wheel"]
+build-backend = "setuptools.build_meta"
