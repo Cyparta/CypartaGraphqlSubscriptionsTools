@@ -15,7 +15,7 @@ from graphql import ExecutionResult, GraphQLError, parse
 from graphql.language import OperationType
 from graphql.language.ast import FieldNode, OperationDefinitionNode
 
-from .utils import filter_requested_fields
+from .utils import GroupNameInvalid, filter_requested_fields, validate_group_name
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +350,69 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             )
             return False
 
+    def _cyparta_subscription_extensions(
+        self,
+        *,
+        registered_groups: list,
+        effective_subscribe: bool,
+        action: str,
+    ) -> dict:
+        return {
+            "cyparta": {
+                "registeredGroups": registered_groups,
+                "subscribe": effective_subscribe,
+                "subscripe": effective_subscribe,
+                "deprecationNotes": [
+                    "Prefer ``subscribe`` (``extensions.cyparta.subscribe``); "
+                    "``subscripe`` is deprecated but still mirrored for compatibility."
+                ],
+                "action": action,
+            }
+        }
+
+    async def _ensure_valid_group_names(
+        self, name_list, op_id: str
+    ) -> list[str] | None:
+        if not isinstance(name_list, (list, tuple)) or len(name_list) == 0:
+            self._enqueue(
+                op_id,
+                ExecutionResult(
+                    data=None,
+                    errors=[
+                        GraphQLError("Invalid subscription channel name.")
+                    ],
+                    extensions=None,
+                ),
+            )
+            return None
+        resolved: list[str] = []
+        for raw in name_list:
+            if not isinstance(raw, str):
+                self._enqueue(
+                    op_id,
+                    ExecutionResult(
+                        data=None,
+                        errors=[
+                            GraphQLError("Invalid subscription channel name.")
+                        ],
+                        extensions=None,
+                    ),
+                )
+                return None
+            try:
+                resolved.append(validate_group_name(raw))
+            except GroupNameInvalid as exc:
+                self._enqueue(
+                    op_id,
+                    ExecutionResult(
+                        data=None,
+                        errors=[GraphQLError(exc.client_message)],
+                        extensions=None,
+                    ),
+                )
+                return None
+        return resolved
+
     async def _teardown_connection_resources(self) -> None:
         if getattr(self, "_sender_task", None) is not None:
             self._sender_task.cancel()
@@ -358,7 +421,8 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             self._sender_task = None
         for group in list(self._group_ops.keys()):
             with suppress(Exception):
-                await self.channel_layer.group_discard(group, self.channel_name)
+                safe = validate_group_name(group)
+                await self.channel_layer.group_discard(safe, self.channel_name)
         self._group_ops.clear()
         self._ops.clear()
         self.groups = {}
@@ -373,18 +437,28 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         requested_fields=None,
         operation_id=None,
         variables=None,
+        *,
+        subscribe=None,
     ):
-        if subscripe:
+        if subscribe is not None:
+            want_subscribe = bool(subscribe)
+        else:
+            want_subscribe = bool(subscripe)
+        if want_subscribe:
             await self.register_group(
                 name_list,
                 subscripe,
                 requested_fields,
                 operation_id=operation_id,
                 variables=variables,
+                subscribe=subscribe,
             )
         else:
             await self.un_register_group(
-                name_list, subscripe, operation_id=operation_id
+                name_list,
+                subscripe,
+                operation_id=operation_id,
+                subscribe=subscribe,
             )
 
     async def register_group(
@@ -394,14 +468,27 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         requested_fields=None,
         operation_id=None,
         variables=None,
+        *,
+        subscribe=None,
     ):
-        if not subscripe:
+        if subscribe is not None:
+            effective_subscribe = bool(subscribe)
+        else:
+            effective_subscribe = bool(subscripe)
+        if not effective_subscribe:
             await self.un_register_group(
-                name_list, subscripe, operation_id=operation_id
+                name_list,
+                subscripe,
+                operation_id=operation_id,
+                subscribe=subscribe,
             )
             return
 
         op_id = self._resolve_operation_id(operation_id)
+        validated_names = await self._ensure_valid_group_names(name_list, op_id)
+        if validated_names is None:
+            return
+
         if op_id not in self._ops:
             self._ops[op_id] = OperationState(
                 requested_fields=list(requested_fields) if requested_fields else None,
@@ -427,7 +514,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             active = getattr(self, "_active_subscribe_variables", None)
             variables_effective = dict(active) if isinstance(active, dict) and active else {}
 
-        to_add = [n for n in name_list if n not in state.groups]
+        to_add = [n for n in validated_names if n not in state.groups]
         for name in to_add:
             if not await self.can_subscribe_to_group(
                 name, operation_id=op_id, variables=variables_effective
@@ -452,38 +539,43 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
                     del self._ops[op_id]
                 return
 
-        for name in name_list:
+        for name in validated_names:
             if name not in state.groups:
                 state.groups.add(name)
                 await self.channel_layer.group_add(name, self.channel_name)
             self._group_ops[name].add(op_id)
 
-        self.name = name_list[-1] if name_list else None
+        self.name = validated_names[-1] if validated_names else None
         self.groups = {g: True for g in state.groups}
 
-        registered_groups_ack = [n for n in name_list if n in state.groups]
+        registered_groups_ack = [n for n in validated_names if n in state.groups]
 
         self._enqueue(
             op_id,
             ExecutionResult(
                 data=None,
                 errors=None,
-                extensions={
-                    "cyparta": {
-                        "registeredGroups": registered_groups_ack,
-                        "subscripe": subscripe,
-                        "action": "register",
-                    }
-                },
+                extensions=self._cyparta_subscription_extensions(
+                    registered_groups=registered_groups_ack,
+                    effective_subscribe=effective_subscribe,
+                    action="register",
+                ),
             ),
         )
 
     async def un_register_group(
-        self, name_list, subscripe, operation_id=None
+        self, name_list, subscripe, operation_id=None, *, subscribe=None
     ):
+        if subscribe is not None:
+            effective_subscribe = bool(subscribe)
+        else:
+            effective_subscribe = bool(subscripe)
         op_id = self._resolve_operation_id(operation_id)
+        validated_names = await self._ensure_valid_group_names(name_list, op_id)
+        if validated_names is None:
+            return
         state = self._ops.get(op_id)
-        for name in name_list:
+        for name in validated_names:
             if state and name in state.groups:
                 state.groups.discard(name)
             if name in self._group_ops:
@@ -497,13 +589,11 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             ExecutionResult(
                 data=None,
                 errors=None,
-                extensions={
-                    "cyparta": {
-                        "registeredGroups": list(name_list),
-                        "subscripe": subscripe,
-                        "action": "unregister",
-                    }
-                },
+                extensions=self._cyparta_subscription_extensions(
+                    registered_groups=list(validated_names),
+                    effective_subscribe=effective_subscribe,
+                    action="unregister",
+                ),
             ),
         )
 
@@ -519,7 +609,11 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
                 self._group_ops[group].discard(op_id)
                 if not self._group_ops[group]:
                     del self._group_ops[group]
-                    await self.channel_layer.group_discard(group, self.channel_name)
+                    with suppress(Exception):
+                        safe = validate_group_name(group)
+                        await self.channel_layer.group_discard(
+                            safe, self.channel_name
+                        )
         del self._ops[op_id]
         complete_type = getattr(
             self, "operation_outbound_complete_type", "complete"
@@ -594,6 +688,9 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             message_type = request.get("type")
 
             if message_type == "connection_init":
+                if getattr(self, "_connection_acknowledged", False):
+                    await self.close(code=4429)
+                    return
                 await self.send_json({"type": "connection_ack"})
                 self._connection_acknowledged = True
 

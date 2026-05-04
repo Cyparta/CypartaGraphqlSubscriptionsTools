@@ -186,6 +186,18 @@ async def test_legacy_graphql_ws_error_payload_is_object_not_list():
 
 
 @pytest.mark.asyncio
+async def test_duplicate_connection_init_closes_with_4429():
+    c = _transport_ws_consumer()
+    c.send_json = AsyncMock()
+    c.close = AsyncMock()
+    await c.connect()
+    await c.receive_json({"type": "connection_init"})
+    await c.receive_json({"type": "connection_init"})
+    c.close.assert_awaited()
+    assert c.close.await_args.kwargs.get("code") == 4429
+
+
+@pytest.mark.asyncio
 async def test_ping_replies_pong_transport_ws():
     c = _transport_ws_consumer()
     c.send_json = AsyncMock()

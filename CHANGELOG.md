@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.1.1
+
+### Added
+
+- **`validate_group_name`** / **`GroupNameInvalid`** in **`utils.py`** — channel group names are checked against Django Channels rules (same as **`BaseChannelLayer.valid_group_name`**) before **`group_add`**, **`group_discard`**, and **`group_send`** (including **`trigger_subscription`**). Setting **`CYPARTA_WS_STRICT_GROUP_NAMES`** (default **`True`**) rejects invalid names with a generic GraphQL error; when **`False`**, unsafe characters are normalized to **`_`** where possible.
+- **`subscribe`** keyword argument on **`detect_register_group_status`**, **`register_group`**, and **`un_register_group`** — preferred over the legacy positional **`subscripe`** flag. **`extensions.cyparta`** now includes **`subscribe`**, still mirrors **`subscripe`**, and may include **`deprecationNotes`**.
+- **Duplicate `connection_init`** — second init on the same WebSocket is rejected with close code **`4429`**.
+
 ## 4.1.0
 
 ### Removed (breaking)

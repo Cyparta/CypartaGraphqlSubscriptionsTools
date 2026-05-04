@@ -4,7 +4,7 @@ import setuptools
 
 setuptools.setup(
     name="cypartagraphqlsubscriptionstools",
-    version="4.1.0",
+    version="4.1.1",
     description = "Graphene + Django GraphQL subscriptions over Django Channels (async WebSockets, bounded outbox, multi-operation registry).",
     long_description=pathlib.Path("README.md").read_text(),
     long_description_content_type="text/markdown",

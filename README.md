@@ -6,12 +6,13 @@ For background on the two protocols, see [GraphQL over WebSockets: subscription-
 
 ---
 
-## What you get (v4.1.0)
+## What you get (v4.1.1)
 
 - **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`).
 - **Multi-operation aware** — each client `subscribe` uses a transport **`id`**; groups and payloads are keyed per operation (`_ops` / `_group_ops`).
 - **Live payload shape** — each event is sent as GraphQL `ExecutionResult` data shaped as **`{ "<responseKey>": value }`**, where **response key** is the subscription root field’s **alias** if present, otherwise the **field name** (from `graphql.parse`).
-- **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, `subscripe`) so GraphiQL-style panels see an immediate handshake.
+- **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, **`subscribe`**, legacy **`subscripe`**, optional deprecation notes) so GraphiQL-style panels see an immediate handshake.
+- **Channel group names** — validated against Django Channels rules before **`group_add`** / **`group_discard`** / **`group_send`** (see **`validate_group_name`** in `utils.py`; **`CYPARTA_WS_STRICT_GROUP_NAMES`** defaults to **`True`**).
 - **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** (django-lifecycle hooks) and **`trigger_subscription`** for channel layer broadcasts.
 
 ---
@@ -85,6 +86,10 @@ CYPARTA_WS_REQUIRE_AUTH = True
 # (method may be sync or async). Group registration is all-or-nothing per call: if any
 # requested group is denied, none of the groups in that call are joined.
 # CYPARTA_WS_GROUP_PERMISSION_CLASS = "myapp.permissions.SubscriptionGroupPermission"
+
+# Reject invalid channel group names (default True). When False, unsafe characters
+# are normalized to underscores before join/send (still must yield a valid name).
+CYPARTA_WS_STRICT_GROUP_NAMES = True
 ```
 
 Point **`ASGI_APPLICATION`** at your routing module (see below).
@@ -187,7 +192,7 @@ schema = graphene.Schema(query=Query, subscription=Subscription)
 ## 4. WebSocket protocol (what the client must do)
 
 1. **Negotiate subprotocol** — the handshake must include **`Sec-WebSocket-Protocol: graphql-transport-ws`** or **`graphql-ws`**. Unsupported values are rejected with close code **`1002`**.
-2. **`connection_init`** — send first; the server replies with **`connection_ack`** and only then accepts **`subscribe`**.
+2. **`connection_init`** — send first; the server replies with **`connection_ack`** and only then accepts **`subscribe`**. A second **`connection_init`** on the same socket is rejected with close code **`4429`**.
 3. **`subscribe`** — must include a string **`id`** (GraphQL transport operation id). If **`subscribe`** arrives before **`connection_init`**, the socket is closed with **`4401`**.
 4. **Ending an operation** — **`graphql-transport-ws`**: client sends **`complete`** with **`id`**; the server tears down that operation and replies with **`{"type": "complete", "id": "<id>"}`**. **`graphql-ws`** (Apollo legacy): client sends **`stop`** with **`id`**; the server still completes the operation with an outbound **`{"type": "complete", "id": "<id>"}`** (same as subscription-transport-ws). A **`complete`** / teardown message may be processed even before **`connection_init`** when an **`id`** is present.
 5. **`ping` / `pong`** — on **`graphql-transport-ws`**, a client **`ping`** is answered with **`{"type": "pong"}`**; **`pong`** is ignored.
@@ -211,16 +216,17 @@ Typical pattern:
 ```python
 async_to_sync(root.detect_register_group_status)(
     name_list,           # e.g. ["MyModelCreated"]
-    subscripe,           # True = join groups, False = leave
-    requested_fields,    # optional list of field names for payload filtering, or None
-    operation_id=None,   # optional; omit during normal subscribe execution (uses active op id)
-    variables=None,      # optional; defaults to the subscribe payload variables from the consumer
+    subscripe,           # legacy: True = join groups, False = leave (still supported)
+    requested_fields=None,
+    operation_id=None,
+    variables=None,
+    subscribe=None,      # preferred keyword; if set, overrides positional ``subscripe``
 )
 ```
 
 **`requested_fields`** — when not `None` and non-empty, only those keys are kept under the serialized `fields` dict in the pushed payload (see `filter_requested_fields` in `utils.py`). The helper never mutates the event dict; invalid shapes are passed through unchanged.
 
-**Group names** — align with what you pass to **`trigger_subscription`** (see below). The mixin uses:
+**Group names** — must satisfy Django Channels naming rules (ASCII letters, digits, **`-`**, **`_`**, **`.`**, length strictly below **100**). Use **`validate_group_name`** from **`utils.py`** if you build names dynamically. Align names with **`trigger_subscription`** (see below). The mixin uses:
 
 - `{ModelName}Created`
 - `{ModelName}Updated.{pk}`
@@ -317,6 +323,7 @@ application = ProtocolTypeRouter({
 
 ## 9. Upgrading from older releases
 
+- **v4.1.1** — Channel group names are validated (`validate_group_name`, `CYPARTA_WS_STRICT_GROUP_NAMES`). Prefer the `subscribe` keyword on `detect_register_group_status` / `register_group` over `subscripe`; `extensions.cyparta` now includes `subscribe` (and still mirrors `subscripe`). A second `connection_init` on one socket closes with **4429**.
 - **v4.1.0** — No bundled **`MyModel`**, package **`schema`**, or **`0001_initial`** migration; define models and **`GRAPHENE["SCHEMA"]`** in your project (or use **`examples/`** from a git checkout).
 - **RxPY removed** — delivery uses a bounded queue + sender task.
 - **Adapter settings removed** — no `CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER`, `CYPARTA_LEGACY_SUBSCRIPTION_DATA`, or `adapt_channel_event`.
