@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.1.4
+
+### Fixed / hardened
+
+- **Outbox `drop_oldest`** — after **`get_nowait()`**, call **`task_done()`** so **`asyncio.Queue`** unfinished-task accounting stays balanced (safe if **`join()`** is used later).
+- **Outbox `close_connection`** — schedule at most one close per socket (**`_outbox_close_scheduled`**); overflow counters increment only when a close is actually scheduled.
+- **`_safe_passthrough`** — dict keys are coerced with **`str(...)`** for JSON-safe wire payloads while preserving recursive value normalization.
+
+### Documentation
+
+- **README** — **Recommended production settings** table and guidance for **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** (dashboards vs chat vs **`close_connection`**).
+
+### Tooling
+
+- **`pytest-django`** in **`[test]`** extras and **`DJANGO_SETTINGS_MODULE`** in **`pytest.ini`** so **`@pytest.mark.django_db`** mixin tests run against migrated tables.
+
 ## 4.1.3
 
 ### Added

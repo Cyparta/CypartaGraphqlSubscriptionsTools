@@ -4,7 +4,7 @@ import setuptools
 
 setuptools.setup(
     name="cypartagraphqlsubscriptionstools",
-    version="4.1.3",
+    version="4.1.4",
     description = "Graphene + Django GraphQL subscriptions over Django Channels (async WebSockets, bounded outbox, multi-operation registry).",
     long_description=pathlib.Path("README.md").read_text(),
     long_description_content_type="text/markdown",
@@ -36,6 +36,6 @@ setuptools.setup(
     ],
     include_package_data=True,
     extras_require={
-        "test": ["pytest>=7.0", "pytest-asyncio>=0.21"],
+        "test": ["pytest>=7.0", "pytest-asyncio>=0.21", "pytest-django>=4.5"],
     },
 )

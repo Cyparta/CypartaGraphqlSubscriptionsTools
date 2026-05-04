@@ -32,3 +32,11 @@ async def test_tuple_converted_to_list_on_fallback():
             await events.trigger_subscription("ValidGroup", (1, (2, 3)))
     payload = layer.group_send.await_args.args[1]["value"]
     assert payload == [1, [2, 3]]
+
+
+def test_safe_passthrough_dict_keys_are_strings():
+    assert events._safe_passthrough({1: "a", "b": 2, (1, 2): 3}) == {
+        "1": "a",
+        "b": 2,
+        "(1, 2)": 3,
+    }

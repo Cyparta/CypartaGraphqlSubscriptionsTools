@@ -52,7 +52,7 @@ def _safe_passthrough(value):
     if isinstance(value, list):
         return [_safe_passthrough(v) for v in value]
     if isinstance(value, dict):
-        return {k: _safe_passthrough(v) for k, v in value.items()}
+        return {str(k): _safe_passthrough(v) for k, v in value.items()}
     return None
 
 

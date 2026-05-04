@@ -233,6 +233,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         self._outbound_dropped = 0
         self._outbox_drop_oldest_count = 0
         self._outbox_overflow_close_count = 0
+        self._outbox_close_scheduled = False
         self.groups = {}
         self.requested_fields = None
         self.name = None
@@ -265,12 +266,21 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             finally:
                 self._outbox.task_done()
 
-    def _schedule_outbox_overflow_close(self) -> None:
+    def _schedule_outbox_overflow_close(self) -> bool:
+        """
+        Schedule a single socket close on outbox overflow.
+
+        Returns True if a close task was scheduled, False if one was already pending.
+        """
+        if getattr(self, "_outbox_close_scheduled", False):
+            return False
+        self._outbox_close_scheduled = True
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            self._outbox_close_scheduled = False
             logger.warning("outbox overflow close: no running event loop")
-            return
+            return False
 
         async def _close() -> None:
             try:
@@ -279,6 +289,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
                 logger.exception("outbox overflow close failed")
 
         loop.create_task(_close())
+        return True
 
     def _enqueue(self, operation_id: str | None, result: ExecutionResult) -> None:
         raw = getattr(settings, "CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY", "drop_newest")
@@ -309,6 +320,8 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             try:
                 self._outbox.get_nowait()
                 dropped_one = True
+                # Pair with put_nowait's unfinished counter so join() cannot deadlock.
+                self._outbox.task_done()
             except asyncio.QueueEmpty:
                 pass
             if dropped_one:
@@ -327,14 +340,14 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
                 )
             return
 
-        type(self).outbox_overflow_close_connection_total += 1
-        self._outbox_overflow_close_count += 1
-        logger.warning(
-            "subscription outbox full (%s); scheduling socket close operation_id=%s",
-            strategy,
-            operation_id,
-        )
-        self._schedule_outbox_overflow_close()
+        if self._schedule_outbox_overflow_close():
+            type(self).outbox_overflow_close_connection_total += 1
+            self._outbox_overflow_close_count += 1
+            logger.warning(
+                "subscription outbox full (%s); scheduling socket close operation_id=%s",
+                strategy,
+                operation_id,
+            )
 
     async def disconnect(self, close_code):
         await self._teardown_connection_resources()

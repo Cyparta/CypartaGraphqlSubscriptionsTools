@@ -6,7 +6,7 @@ For background on the two protocols, see [GraphQL over WebSockets: subscription-
 
 ---
 
-## What you get (v4.1.3)
+## What you get (v4.1.4)
 
 - **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`) and optional **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** (`drop_newest`, `drop_oldest`, or `close_connection` with close code **4413**).
 - **Multi-operation aware** — each client `subscribe` uses a transport **`id`**; groups and payloads are keyed per operation (`_ops` / `_group_ops`).
@@ -104,6 +104,22 @@ CYPARTA_WS_STRICT_GROUP_NAMES = True
 # Outbox full policy: "drop_newest" (default), "drop_oldest", or "close_connection" (4413).
 # CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY = "drop_newest"
 ```
+
+### Recommended production settings
+
+These are not defaults for every project, but they are a sensible baseline for locked-down, predictable behavior:
+
+| Setting | Recommended | Why |
+|--------|-------------|-----|
+| **`CYPARTA_WS_REQUIRE_AUTH`** | **`True`** | Ensures subscription group joins map to an authenticated `scope["user"]` unless you intentionally expose public feeds. |
+| **`CYPARTA_WS_STRICT_GROUP_NAMES`** | **`True`** | Rejects invalid Django Channels group strings at the boundary instead of normalizing unexpected input. |
+| **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`** | **`True`** | Avoids publishing payloads when both the custom serializer (if any) and **`serialize_value`** fail; the event is skipped and the failure is logged. |
+
+**Outbox overflow strategy (`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`)** — pick based on how stale data should behave:
+
+- **Dashboards / live metrics** — clients often only need the **latest** update. Prefer **`drop_oldest`**: when the outbox is full, the oldest queued message is discarded so newer ticks can be enqueued. Alternatively keep **`drop_newest`** and reduce **`CYPARTA_WS_OUTBOX_MAXSIZE`** if you prefer to drop only the newest overflow and retain older queued frames.
+- **Chat / notification-style feeds** — usually keep the default **`drop_newest`** so a backlog of older messages is not silently discarded when one slow client fills the queue. If you only care about the most recent N messages, **`drop_oldest`** is also reasonable.
+- **`close_connection`** — disconnects the socket (code **4413**) when the outbox is full; use when you want to shed pathological slow clients and force a reconnect rather than dropping silently.
 
 Point **`ASGI_APPLICATION`** at your routing module (see below).
 
@@ -355,6 +371,7 @@ application = ProtocolTypeRouter({
 
 ## 9. Upgrading from older releases
 
+- **v4.1.4** — **`drop_oldest`** outbox path calls **`task_done()`** after **`get_nowait()`** (safe for future **`join()`**); overflow close scheduled at most once per socket; **`_safe_passthrough`** stringifies dict keys; README **Recommended production settings** (auth, strict names, drop-on-serialize-error, outbox strategy guidance).
 - **v4.1.3** — Serializer import caching; **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**; mixin **`get_subscription_payload`** and per-group publish **`try`/`except`**; **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** for full outbox.
 - **v4.1.2** — **`subscribe=`** can be used without positional **`subscripe`**. **`deprecationNotes`** only when legacy positional is used without **`subscribe`**. Mixin uses **`transaction.on_commit`** and **`after_delete`** (was **`before_delete`**). Optional **`CYPARTA_WS_EVENT_SERIALIZER`**, **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`**.
 - **v4.1.1** — Channel group names are validated (`validate_group_name`, `CYPARTA_WS_STRICT_GROUP_NAMES`). Prefer the `subscribe` keyword on `detect_register_group_status` / `register_group` over `subscripe`; `extensions.cyparta` now includes `subscribe` (and still mirrors `subscripe`). A second `connection_init` on one socket closes with **4429**.
