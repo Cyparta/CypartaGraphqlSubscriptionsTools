@@ -1,5 +1,7 @@
 .venv/
+.venv-publish/
 venv/
+build/
 __pycache__/
 *.py[cod]
 dist/

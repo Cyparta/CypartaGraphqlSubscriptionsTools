@@ -8,4 +8,3 @@ django_lifecycle
 pytest>=7.0
 pytest-asyncio>=0.21
 pytest-django>=4.5
-pytest-django>=4.5
