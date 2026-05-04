@@ -349,3 +349,11 @@ application = ProtocolTypeRouter({
         ))
     
 })
+```
+
+## Upgrading to 2.0.0
+
+- **Per-socket state:** `groups` is created in `connect()` on each consumer instance (no shared class dict).
+- **Channel payloads:** implement **`adapt_channel_event`** or **`CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER`** to turn `{pk, fields, …}` into a proper `ExecutionResult` for your subscription field(s). See **`CHANGELOG.md`**.
+- **Registration ack:** read **`payload.extensions.cyparta`** instead of ad-hoc `payload.data` for register/unregister confirmations.
+- **Legacy:** `CYPARTA_LEGACY_SUBSCRIPTION_DATA = True` restores putting the raw dict on `payload.data` (for transitional clients only).
