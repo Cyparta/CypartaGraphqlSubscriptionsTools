@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: cypartagraphqlsubscriptionstools
-Version: 4.1.1
+Version: 4.1.2
 Summary: Graphene + Django GraphQL subscriptions over Django Channels (async WebSockets, bounded outbox, multi-operation registry).
 Home-page: https://cyparta.com/
 Author: Cyparta Software House
@@ -32,14 +32,14 @@ For background on the two protocols, see [GraphQL over WebSockets: subscription-
 
 ---
 
-## What you get (v4.1.1)
+## What you get (v4.1.2)
 
 - **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`).
 - **Multi-operation aware** — each client `subscribe` uses a transport **`id`**; groups and payloads are keyed per operation (`_ops` / `_group_ops`).
 - **Live payload shape** — each event is sent as GraphQL `ExecutionResult` data shaped as **`{ "<responseKey>": value }`**, where **response key** is the subscription root field’s **alias** if present, otherwise the **field name** (from `graphql.parse`).
-- **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, **`subscribe`**, legacy **`subscripe`**, optional deprecation notes) so GraphiQL-style panels see an immediate handshake.
+- **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, **`subscribe`**, legacy **`subscripe`**, and **`deprecationNotes`** only when the legacy positional **`subscripe`** was used without **`subscribe=`**).
 - **Channel group names** — validated against Django Channels rules before **`group_add`** / **`group_discard`** / **`group_send`** (see **`validate_group_name`** in `utils.py`; **`CYPARTA_WS_STRICT_GROUP_NAMES`** defaults to **`True`**).
-- **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** (django-lifecycle hooks) and **`trigger_subscription`** for channel layer broadcasts.
+- **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** schedules **`trigger_subscription`** on **`transaction.on_commit`** (no publish on rollback). Optional **`CYPARTA_WS_EVENT_SERIALIZER`** and **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`** for server-side publishes.
 
 ---
 
@@ -116,6 +116,13 @@ CYPARTA_WS_REQUIRE_AUTH = True
 # Reject invalid channel group names (default True). When False, unsafe characters
 # are normalized to underscores before join/send (still must yield a valid name).
 CYPARTA_WS_STRICT_GROUP_NAMES = True
+
+# Optional: dotted path to async or sync callable(value, group=None, scope=None)
+# for channel payloads from trigger_subscription. Default uses serialize_value.
+# CYPARTA_WS_EVENT_SERIALIZER = "myapp.ws.event_serialize.serialize_subscription_event"
+
+# If True, trigger_subscription raises GroupNameInvalid on bad group names (default False).
+# CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP = False
 ```
 
 Point **`ASGI_APPLICATION`** at your routing module (see below).

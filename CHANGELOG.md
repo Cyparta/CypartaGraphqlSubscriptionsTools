@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.1.2
+
+### Added
+
+- **`subscribe` first-class** — `detect_register_group_status`, `register_group`, and `un_register_group` accept calls with only **`subscribe=`** (positional **`subscripe`** optional). **`deprecationNotes`** in **`extensions.cyparta`** appear only when the legacy positional **`subscripe`** is used and **`subscribe`** is not passed.
+- **`CypartaSubscriptionModelMixin`** — publishes via **`transaction.on_commit`** so rolled-back transactions do not emit events. Hooks **`should_publish_subscription_event(action)`** and **`get_subscription_group_names(action)`**; create/update use **`after_*`** hooks; delete uses **`after_delete`** (was **`before_delete`**) so the row is gone only after commit while **`pk`** remains on the instance for default group names.
+- **`CYPARTA_WS_EVENT_SERIALIZER`** — optional dotted path to a callable **`(value, group=None, scope=None)`** (sync or async); default remains **`serialize_value`**. Serialization failures are logged; safe fallbacks for plain JSON-like values.
+- **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`** (default **`False`**) — when **`True`**, **`trigger_subscription`** raises **`GroupNameInvalid`** on invalid group names instead of skipping.
+
 ## 4.1.1
 
 ### Added

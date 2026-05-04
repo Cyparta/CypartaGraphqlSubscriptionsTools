@@ -6,14 +6,14 @@ For background on the two protocols, see [GraphQL over WebSockets: subscription-
 
 ---
 
-## What you get (v4.1.1)
+## What you get (v4.1.2)
 
 - **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`).
 - **Multi-operation aware** — each client `subscribe` uses a transport **`id`**; groups and payloads are keyed per operation (`_ops` / `_group_ops`).
 - **Live payload shape** — each event is sent as GraphQL `ExecutionResult` data shaped as **`{ "<responseKey>": value }`**, where **response key** is the subscription root field’s **alias** if present, otherwise the **field name** (from `graphql.parse`).
-- **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, **`subscribe`**, legacy **`subscripe`**, optional deprecation notes) so GraphiQL-style panels see an immediate handshake.
+- **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, **`subscribe`**, legacy **`subscripe`**, and **`deprecationNotes`** only when the legacy positional **`subscripe`** was used without **`subscribe=`**).
 - **Channel group names** — validated against Django Channels rules before **`group_add`** / **`group_discard`** / **`group_send`** (see **`validate_group_name`** in `utils.py`; **`CYPARTA_WS_STRICT_GROUP_NAMES`** defaults to **`True`**).
-- **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** (django-lifecycle hooks) and **`trigger_subscription`** for channel layer broadcasts.
+- **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** schedules **`trigger_subscription`** on **`transaction.on_commit`** (no publish on rollback). Optional **`CYPARTA_WS_EVENT_SERIALIZER`** and **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`** for server-side publishes.
 
 ---
 
@@ -90,6 +90,13 @@ CYPARTA_WS_REQUIRE_AUTH = True
 # Reject invalid channel group names (default True). When False, unsafe characters
 # are normalized to underscores before join/send (still must yield a valid name).
 CYPARTA_WS_STRICT_GROUP_NAMES = True
+
+# Optional: dotted path to async or sync callable(value, group=None, scope=None)
+# for channel payloads from trigger_subscription. Default uses serialize_value.
+# CYPARTA_WS_EVENT_SERIALIZER = "myapp.ws.event_serialize.serialize_subscription_event"
+
+# If True, trigger_subscription raises GroupNameInvalid on bad group names (default False).
+# CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP = False
 ```
 
 Point **`ASGI_APPLICATION`** at your routing module (see below).
@@ -211,16 +218,27 @@ from asgiref.sync import async_to_sync
 from CypartaGraphqlSubscriptionsTools.utils import get_model_name_instance
 ```
 
-Typical pattern:
+Typical pattern (preferred — keyword **`subscribe`** only):
 
 ```python
 async_to_sync(root.detect_register_group_status)(
-    name_list,           # e.g. ["MyModelCreated"]
-    subscripe,           # legacy: True = join groups, False = leave (still supported)
+    [f"{model_name}Created"],
+    requested_fields=requested_fields,
+    variables=info.variable_values,
+    subscribe=subscripe,   # map from your GraphQL argument name
+)
+```
+
+Legacy positional **`subscripe`** remains supported as the second argument; **`deprecationNotes`** are sent only in that case when **`subscribe`** is not passed:
+
+```python
+async_to_sync(root.detect_register_group_status)(
+    name_list,
+    subscripe,           # optional positional: True = join, False = leave
     requested_fields=None,
     operation_id=None,
     variables=None,
-    subscribe=None,      # preferred keyword; if set, overrides positional ``subscripe``
+    subscribe=None,     # if set, overrides positional ``subscripe``
 )
 ```
 
@@ -258,8 +276,8 @@ class Subscription(graphene.ObjectType):
         model_name = get_model_name_instance(MyModelType)
         return async_to_sync(root.detect_register_group_status)(
             [f"{model_name}Created"],
-            subscripe,
-            requested_fields,
+            requested_fields=requested_fields,
+            subscribe=subscripe,
         )
 ```
 
@@ -269,7 +287,7 @@ Use the same idea for **`Updated` / `Deleted`** with groups like `f"{model_name}
 
 ## 6. Model mixin (optional)
 
-Subclass **`CypartaSubscriptionModelMixin`** so creates / updates / deletes emit channel events (requires **django-lifecycle** on the model):
+Subclass **`CypartaSubscriptionModelMixin`** so creates / updates / deletes emit channel events (requires **django-lifecycle** on the model). Publishes are scheduled with **`django.db.transaction.on_commit`**, so events are not sent if the surrounding transaction rolls back.
 
 ```python
 # your_app/models.py
@@ -281,11 +299,16 @@ class Article(CypartaSubscriptionModelMixin, models.Model):
     title = models.CharField(max_length=200)
 ```
 
+Optional hooks (override on your model):
+
+- **`should_publish_subscription_event(self, action: str) -> bool`** — `action` is **`"create"`**, **`"update"`**, or **`"delete"`**; return **`False`** to skip scheduling.
+- **`get_subscription_group_names(self, action: str) -> list[str]`** — default names: **`{ModelName}Created`**, **`{ModelName}Updated.{pk}`**, **`{ModelName}Deleted.{pk}`**.
+
 ---
 
 ## 7. Publishing events from your code
 
-Use **`trigger_subscription`** to send a message to everyone in a channel group. Values that are **`models.Model`** instances are passed through **`serialize_value`** (JSON serialize + shape with `pk`, `fields`, optional `group`):
+Use **`trigger_subscription`** to send a message to everyone in a channel group. Values that are **`models.Model`** instances are passed through **`serialize_value`** by default (JSON serialize + shape with `pk`, `fields`, optional `group`). Set **`CYPARTA_WS_EVENT_SERIALIZER`** to a dotted path for a custom **`(value, group=None, scope=None)`** callable (sync or async); errors are logged and the stack falls back to **`serialize_value`** then plain JSON-safe values where possible.
 
 ```python
 from asgiref.sync import async_to_sync
@@ -323,6 +346,7 @@ application = ProtocolTypeRouter({
 
 ## 9. Upgrading from older releases
 
+- **v4.1.2** — **`subscribe=`** can be used without positional **`subscripe`**. **`deprecationNotes`** only when legacy positional is used without **`subscribe`**. Mixin uses **`transaction.on_commit`** and **`after_delete`** (was **`before_delete`**). Optional **`CYPARTA_WS_EVENT_SERIALIZER`**, **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`**.
 - **v4.1.1** — Channel group names are validated (`validate_group_name`, `CYPARTA_WS_STRICT_GROUP_NAMES`). Prefer the `subscribe` keyword on `detect_register_group_status` / `register_group` over `subscripe`; `extensions.cyparta` now includes `subscribe` (and still mirrors `subscripe`). A second `connection_init` on one socket closes with **4429**.
 - **v4.1.0** — No bundled **`MyModel`**, package **`schema`**, or **`0001_initial`** migration; define models and **`GRAPHENE["SCHEMA"]`** in your project (or use **`examples/`** from a git checkout).
 - **RxPY removed** — delivery uses a bounded queue + sender task.

@@ -19,6 +19,9 @@ from .utils import GroupNameInvalid, filter_requested_fields, validate_group_nam
 
 logger = logging.getLogger(__name__)
 
+# Positional ``subscripe`` omitted vs explicitly passed (including ``False``).
+_SUBSCRIBE_LEGACY_UNSPECIFIED = object()
+
 # https://wundergraph.com/blog/quirks_of_graphql_subscriptions_sse_websockets_hasura_apollo_federation_supergraph#graphql-subscriptions-over-websockets:-subscription-transport-ws-vs-graphql-ws
 
 
@@ -356,19 +359,20 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         registered_groups: list,
         effective_subscribe: bool,
         action: str,
+        include_subscripe_deprecation: bool,
     ) -> dict:
-        return {
-            "cyparta": {
-                "registeredGroups": registered_groups,
-                "subscribe": effective_subscribe,
-                "subscripe": effective_subscribe,
-                "deprecationNotes": [
-                    "Prefer ``subscribe`` (``extensions.cyparta.subscribe``); "
-                    "``subscripe`` is deprecated but still mirrored for compatibility."
-                ],
-                "action": action,
-            }
+        cy: dict = {
+            "registeredGroups": registered_groups,
+            "subscribe": effective_subscribe,
+            "subscripe": effective_subscribe,
+            "action": action,
         }
+        if include_subscripe_deprecation:
+            cy["deprecationNotes"] = [
+                "Prefer ``subscribe`` (``extensions.cyparta.subscribe``); "
+                "positional ``subscripe`` is deprecated but still mirrored as ``subscripe``."
+            ]
+        return {"cyparta": cy}
 
     async def _ensure_valid_group_names(
         self, name_list, op_id: str
@@ -433,7 +437,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
     async def detect_register_group_status(
         self,
         name_list,
-        subscripe=True,
+        subscripe=_SUBSCRIBE_LEGACY_UNSPECIFIED,
         requested_fields=None,
         operation_id=None,
         variables=None,
@@ -442,8 +446,10 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
     ):
         if subscribe is not None:
             want_subscribe = bool(subscribe)
-        else:
+        elif subscripe is not _SUBSCRIBE_LEGACY_UNSPECIFIED:
             want_subscribe = bool(subscripe)
+        else:
+            want_subscribe = True
         if want_subscribe:
             await self.register_group(
                 name_list,
@@ -464,7 +470,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
     async def register_group(
         self,
         name_list,
-        subscripe,
+        subscripe=_SUBSCRIBE_LEGACY_UNSPECIFIED,
         requested_fields=None,
         operation_id=None,
         variables=None,
@@ -473,8 +479,13 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
     ):
         if subscribe is not None:
             effective_subscribe = bool(subscribe)
-        else:
+        elif subscripe is not _SUBSCRIBE_LEGACY_UNSPECIFIED:
             effective_subscribe = bool(subscripe)
+        else:
+            effective_subscribe = True
+        include_subscripe_deprecation = (
+            subscripe is not _SUBSCRIBE_LEGACY_UNSPECIFIED and subscribe is None
+        )
         if not effective_subscribe:
             await self.un_register_group(
                 name_list,
@@ -559,17 +570,28 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
                     registered_groups=registered_groups_ack,
                     effective_subscribe=effective_subscribe,
                     action="register",
+                    include_subscripe_deprecation=include_subscripe_deprecation,
                 ),
             ),
         )
 
     async def un_register_group(
-        self, name_list, subscripe, operation_id=None, *, subscribe=None
+        self,
+        name_list,
+        subscripe=_SUBSCRIBE_LEGACY_UNSPECIFIED,
+        operation_id=None,
+        *,
+        subscribe=None,
     ):
         if subscribe is not None:
             effective_subscribe = bool(subscribe)
-        else:
+        elif subscripe is not _SUBSCRIBE_LEGACY_UNSPECIFIED:
             effective_subscribe = bool(subscripe)
+        else:
+            effective_subscribe = False
+        include_subscripe_deprecation = (
+            subscripe is not _SUBSCRIBE_LEGACY_UNSPECIFIED and subscribe is None
+        )
         op_id = self._resolve_operation_id(operation_id)
         validated_names = await self._ensure_valid_group_names(name_list, op_id)
         if validated_names is None:
@@ -593,6 +615,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
                     registered_groups=list(validated_names),
                     effective_subscribe=effective_subscribe,
                     action="unregister",
+                    include_subscripe_deprecation=include_subscripe_deprecation,
                 ),
             ),
         )

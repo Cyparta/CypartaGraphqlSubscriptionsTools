@@ -91,10 +91,8 @@ class MyModelCreatedSubscription(graphene.ObjectType):
     my_custom_event = graphene.Field(CustomType, subscripe=graphene.Boolean())
 
     def resolve_my_custom_event(root, info, subscripe):
-        # Prefer keyword ``subscribe=``; positional ``subscripe`` remains supported.
         return async_to_sync(root.detect_register_group_status)(
             ["custom_event"],
-            subscripe,
             variables=info.variable_values,
             subscribe=subscripe,
         )
