@@ -1,8 +1,8 @@
 # CypartaGraphqlSubscriptionsTools
 
-![CypartaGraphqlSubscriptionsTools cover](cover.jpg)
+![CypartaGraphqlSubscriptionsTools cover](https://raw.githubusercontent.com/Cyparta/CypartaGraphqlSubscriptionsTools/main/cover.jpg)
 
-**Version 4.1.4**
+**Version 4.1.5**
 
 Graphene + Django **GraphQL subscriptions** over **Django Channels** (async WebSockets). The package ships a production-oriented consumer that speaks:
 
@@ -13,7 +13,7 @@ The server selects the protocol from the `Sec-WebSocket-Protocol` header. Your G
 
 ### Architecture overview
 
-![Subscription flow and components](graph.jpg)
+![Subscription flow and components](https://raw.githubusercontent.com/Cyparta/CypartaGraphqlSubscriptionsTools/main/graph.jpg)
 
 ---
 
@@ -622,6 +622,7 @@ When **`trigger_subscription`** sends a **dict** whose **`fields`** value is its
 
 ## Upgrade notes
 
+- **v4.1.5** — README overhaul (quick start, production settings, Articles example, permissions, serializers, clients, troubleshooting). Cover and architecture images; **`MANIFEST.in`** ships **`cover.jpg`** / **`graph.jpg`** with the sdist. PyPI-friendly image URLs in README.
 - **v4.1.4** — **`drop_oldest`** calls **`task_done()`** after discarding the oldest queue item (consistent unfinished count for **`join()`**). **`close_connection`** schedules at most one disconnect per socket. **`_safe_passthrough`** stringifies dict keys for JSON-safe payloads. README and test extras refined (**`pytest-django`** for DB tests).
 - **v4.1.3** — Cached **`CYPARTA_WS_EVENT_SERIALIZER`** import; **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**; **`get_subscription_payload(action)`** on the mixin; per-group **`try`/`except`** around publishes; **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`**.
 - **v4.1.2** — Prefer **`subscribe=`** without positional **`subscripe`**; mixin publishes **`on_commit`**; **`after_delete`** for deletes; optional event serializer and **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`**.

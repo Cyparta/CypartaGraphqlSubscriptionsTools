@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.1.5
+
+### Documentation
+
+- **README** — Full rewrite: installation, quick start (Channels / Graphene / ASGI), production settings table, Articles app example, permission class, custom event serializer, manual **`trigger_subscription`**, **graphql-transport-ws** and legacy **graphql-ws** client frames, group naming, authentication, payload filtering, troubleshooting, upgrade notes.
+- **Packaging** — **`MANIFEST.in`** includes **`README.md`**, **`LICENSE`**, **`cover.jpg`**, **`graph.jpg`** so source distributions carry assets used on the project page.
+
 ## 4.1.4
 
 ### Fixed / hardened

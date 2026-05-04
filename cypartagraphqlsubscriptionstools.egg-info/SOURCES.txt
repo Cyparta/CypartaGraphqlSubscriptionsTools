@@ -1,5 +1,8 @@
 LICENSE
+MANIFEST.in
 README.md
+cover.jpg
+graph.jpg
 pyproject.toml
 setup.py
 CypartaGraphqlSubscriptionsTools/__init__.py
