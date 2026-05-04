@@ -33,6 +33,21 @@ class AsyncDenyPolicy:
         return group_name != "async_denied"
 
 
+class RaisingPermission:
+    def has_permission(self, user, group_name, operation_id=None, scope=None, variables=None):
+        raise RuntimeError("simulated policy failure")
+
+
+class CountingPermission:
+    init_count = 0
+
+    def __init__(self):
+        CountingPermission.init_count += 1
+
+    def has_permission(self, user, group_name, operation_id=None, scope=None, variables=None):
+        return True
+
+
 def _bare_consumer(scope):
     c = object.__new__(CypartaGraphqlSubscriptionsConsumer)
     c.scope = scope
@@ -110,11 +125,10 @@ async def test_custom_permission_class_denies_sends_error_and_skips_group_add():
         ["allowed_group", "blocked_channel"], True, None, operation_id="op1"
     )
 
-    ga = c.channel_layer.group_add
-    assert ga.await_count == 1
-    assert ga.await_args_list[0].args[0] == "allowed_group"
+    c.channel_layer.group_add.assert_not_awaited()
+    assert c._group_ops.get("allowed_group", set()) == set()
     assert c._group_ops.get("blocked_channel", set()) == set()
-    assert "op1" in c._group_ops["allowed_group"]
+    assert "op1" not in c._ops
     assert any(
         r.errors
         and any(
@@ -138,7 +152,8 @@ async def test_denied_group_not_in_group_ops():
 
     await c.register_group(["ok", "nope_group"], True, None, operation_id="op1")
 
-    c.channel_layer.group_add.assert_awaited_once_with("ok", "test-ch")
+    c.channel_layer.group_add.assert_not_awaited()
+    assert c._group_ops.get("ok", set()) == set()
     assert c._group_ops.get("nope_group", set()) == set()
 
 
@@ -168,8 +183,73 @@ async def test_async_has_permission_on_permission_class():
 
     await c.register_group(["fine", "async_denied"], True, None, operation_id="op1")
 
+    c.channel_layer.group_add.assert_not_awaited()
     assert c._group_ops.get("async_denied", set()) == set()
-    assert "op1" in c._group_ops["fine"]
+    assert c._group_ops.get("fine", set()) == set()
+
+
+@pytest.mark.asyncio
+@override_settings(
+    CYPARTA_WS_REQUIRE_AUTH=True,
+    CYPARTA_WS_GROUP_PERMISSION_CLASS="tests.test_ws_permissions.RaisingPermission",
+)
+async def test_permission_has_permission_raises_denies_all_groups_safe_message():
+    user = SimpleNamespace(is_anonymous=False, pk=1)
+    c = _bare_consumer({"type": "websocket", "user": user})
+    c._active_operation_id = "op1"
+    enqueued = []
+    c._enqueue = lambda oid, res: enqueued.append(res)
+
+    await c.register_group(["G1", "G2"], True, None, operation_id="op1")
+
+    c.channel_layer.group_add.assert_not_awaited()
+    assert c._group_ops.get("G1", set()) == set()
+    err_msgs = [
+        getattr(e, "message", str(e))
+        for r in enqueued
+        if r.errors
+        for e in r.errors
+    ]
+    assert any("verified" in m for m in err_msgs)
+    assert not any("G1" in m or "G2" in m for m in err_msgs)
+
+
+@pytest.mark.asyncio
+@override_settings(
+    CYPARTA_WS_REQUIRE_AUTH=True,
+    CYPARTA_WS_GROUP_PERMISSION_CLASS="tests.test_ws_permissions.CountingPermission",
+)
+async def test_permission_class_instantiated_once_per_connection():
+    CountingPermission.init_count = 0
+    user = SimpleNamespace(is_anonymous=False, pk=1)
+    c = _bare_consumer({"type": "websocket", "user": user})
+    c._active_operation_id = "op1"
+    c._enqueue = MagicMock()
+
+    await c.register_group(["A", "B", "C"], True, None, operation_id="op1")
+
+    assert CountingPermission.init_count == 1
+    assert c.channel_layer.group_add.await_count == 3
+
+
+@pytest.mark.asyncio
+@override_settings(
+    CYPARTA_WS_REQUIRE_AUTH=True,
+    CYPARTA_WS_GROUP_PERMISSION_CLASS="tests.test_ws_permissions.DenyNopeGroupPolicy",
+)
+async def test_denied_follow_up_register_does_not_remove_existing_groups():
+    user = SimpleNamespace(is_anonymous=False, pk=1)
+    c = _bare_consumer({"type": "websocket", "user": user})
+    c._active_operation_id = "op1"
+    c._enqueue = MagicMock()
+
+    await c.register_group(["ok"], True, None, operation_id="op1")
+    assert "op1" in c._group_ops["ok"]
+
+    await c.register_group(["ok", "nope_group"], True, None, operation_id="op1")
+
+    assert "op1" in c._group_ops["ok"]
+    assert c._group_ops.get("nope_group", set()) == set()
 
 
 @pytest.mark.asyncio

@@ -137,11 +137,14 @@ class DetectWebSocketType(AsyncJsonWebsocketConsumer):
             self.start_command = "subscribe"
             self.result_command = "next"
             self.end_command = "complete"
+            # Server outbound frame when an operation ends (distinct from client ``end_command`` on legacy).
+            self.operation_outbound_complete_type = "complete"
         elif sec_websocket_protocol == "graphql-ws":
             self.ping_command = "ka"
             self.start_command = "start"
             self.result_command = "data"
             self.end_command = "stop"
+            self.operation_outbound_complete_type = "complete"
         else:
             await self.close(code=1002)
             return
@@ -207,7 +210,9 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
     - Live events use Option B: ``data = { "<responseKey>": serialized_value }``
       (response key = field alias or field name).
     - Group join permission: ``can_subscribe_to_group`` (``CYPARTA_WS_REQUIRE_AUTH``,
-      optional ``CYPARTA_WS_GROUP_PERMISSION_CLASS`` with ``has_permission``).
+      optional ``CYPARTA_WS_GROUP_PERMISSION_CLASS`` with ``has_permission``). Joining
+      multiple groups in one call is all-or-nothing: any denial skips every ``group_add``
+      for that call and emits a single GraphQL error.
     """
 
     outbound_dropped_total: int = 0
@@ -224,6 +229,9 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         self.groups = {}
         self.requested_fields = None
         self.name = None
+        self._group_perm_cache = None
+        self._group_perm_cache_path: str | None = None
+        self._last_permission_error_message: str | None = None
         await super().connect()
         if getattr(self, "_ws_accepted", False):
             self._sender_task = asyncio.create_task(self._outbox_sender())
@@ -297,11 +305,14 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
           missing or anonymous.
         - If ``CYPARTA_WS_REQUIRE_AUTH`` is ``False`` and no permission class is set,
           allow (after the auth gate above).
-        - If ``CYPARTA_WS_GROUP_PERMISSION_CLASS`` is set (dotted path), an instance is
-          created and ``await``-compatible ``has_permission(self, user, group_name,
-          operation_id=None, scope=None, variables=None)`` is used; deny if it returns
-          false.
+        - If ``CYPARTA_WS_GROUP_PERMISSION_CLASS`` is set (dotted path), one instance is
+          cached per WebSocket connection and ``await``-compatible
+          ``has_permission(self, user, group_name, operation_id=None, scope=None,
+          variables=None)`` is used; deny if it returns false. Import or permission
+          errors deny the subscription; see ``_last_permission_error_message`` for a
+          safe client-facing hint (server logs retain details).
         """
+        self._last_permission_error_message = None
         variables = variables if isinstance(variables, dict) else {}
         require_auth = getattr(settings, "CYPARTA_WS_REQUIRE_AUTH", True)
         user = self.scope.get("user")
@@ -315,18 +326,29 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         if not class_path:
             return True
 
-        perm_cls = import_string(class_path)
-        perm = perm_cls()
-        if not hasattr(perm, "has_permission"):
-            logger.error(
-                "CYPARTA_WS_GROUP_PERMISSION_CLASS %r has no has_permission method",
-                class_path,
+        try:
+            if getattr(self, "_group_perm_cache_path", None) != class_path:
+                perm_cls = import_string(class_path)
+                self._group_perm_cache = perm_cls()
+                self._group_perm_cache_path = class_path
+            perm = self._group_perm_cache
+
+            if not hasattr(perm, "has_permission"):
+                logger.error(
+                    "CYPARTA_WS_GROUP_PERMISSION_CLASS %r has no has_permission method",
+                    class_path,
+                )
+                return False
+
+            return await self._invoke_has_permission(
+                perm, user, group_name, operation_id, self.scope, variables
+            )
+        except Exception:
+            logger.exception("subscription group permission check failed")
+            self._last_permission_error_message = (
+                "Subscription permission could not be verified."
             )
             return False
-
-        return await self._invoke_has_permission(
-            perm, user, group_name, operation_id, self.scope, variables
-        )
 
     async def _teardown_connection_resources(self) -> None:
         if getattr(self, "_sender_task", None) is not None:
@@ -340,6 +362,9 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         self._group_ops.clear()
         self._ops.clear()
         self.groups = {}
+        self._group_perm_cache = None
+        self._group_perm_cache_path = None
+        self._last_permission_error_message = None
 
     async def detect_register_group_status(
         self,
@@ -402,18 +427,33 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             active = getattr(self, "_active_subscribe_variables", None)
             variables_effective = dict(active) if isinstance(active, dict) and active else {}
 
-        denied_any = False
+        to_add = [n for n in name_list if n not in state.groups]
+        for name in to_add:
+            if not await self.can_subscribe_to_group(
+                name, operation_id=op_id, variables=variables_effective
+            ):
+                deny_message = (
+                    getattr(self, "_last_permission_error_message", None)
+                    or "Not authorized to subscribe to one or more subscription channels."
+                )
+                logger.warning(
+                    "websocket subscription group access denied operation_id=%s",
+                    op_id,
+                )
+                self._enqueue(
+                    op_id,
+                    ExecutionResult(
+                        data=None,
+                        errors=[GraphQLError(deny_message)],
+                        extensions=None,
+                    ),
+                )
+                if not state.groups:
+                    del self._ops[op_id]
+                return
+
         for name in name_list:
             if name not in state.groups:
-                if not await self.can_subscribe_to_group(
-                    name, operation_id=op_id, variables=variables_effective
-                ):
-                    denied_any = True
-                    logger.warning(
-                        "websocket subscription group access denied operation_id=%s",
-                        op_id,
-                    )
-                    continue
                 state.groups.add(name)
                 await self.channel_layer.group_add(name, self.channel_name)
             self._group_ops[name].add(op_id)
@@ -422,20 +462,6 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         self.groups = {g: True for g in state.groups}
 
         registered_groups_ack = [n for n in name_list if n in state.groups]
-
-        if denied_any:
-            self._enqueue(
-                op_id,
-                ExecutionResult(
-                    data=None,
-                    errors=[
-                        GraphQLError(
-                            "Not authorized to subscribe to one or more subscription channels."
-                        )
-                    ],
-                    extensions=None,
-                ),
-            )
 
         self._enqueue(
             op_id,
@@ -495,7 +521,10 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
                     del self._group_ops[group]
                     await self.channel_layer.group_discard(group, self.channel_name)
         del self._ops[op_id]
-        await self.send_json({"type": "complete", "id": op_id})
+        complete_type = getattr(
+            self, "operation_outbound_complete_type", "complete"
+        )
+        await self.send_json({"type": complete_type, "id": op_id})
 
     async def send_operation_error(
         self, operation_id, message: str, code: str | None = None
@@ -567,6 +596,17 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             if message_type == "connection_init":
                 await self.send_json({"type": "connection_ack"})
                 self._connection_acknowledged = True
+
+            elif message_type == "connection_terminate":
+                await self.close(code=1000)
+                return
+
+            elif message_type == "ping":
+                await self.send_json({"type": "pong"})
+                return
+
+            elif message_type == "pong":
+                return
 
             elif message_type == self.start_command:
                 if not getattr(self, "_connection_acknowledged", False):

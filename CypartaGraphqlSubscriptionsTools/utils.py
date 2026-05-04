@@ -4,18 +4,35 @@ def get_model_name_instance(ModelType):
     return ModelType._meta.model.__name__
 
 
+def filter_requested_fields(deserialized_data, requested_fields):
+    """
+    Return subscription payload data, optionally filtering ``fields`` by name.
 
-def filter_requested_fields(deserialized_data,requested_fields):
- 
-            
-    if requested_fields is not None:
-        exposed_fields = {
-            field: deserialized_data['fields'][field]
-            for field in requested_fields
-            if field in deserialized_data['fields']
-        }
-    else:
-        # If requested_fields is None, expose all fields or handle as needed
-        exposed_fields = deserialized_data['fields']
-    deserialized_data['fields']=exposed_fields
-    return deserialized_data
+    Never mutates ``deserialized_data``. If ``requested_fields`` is ``None`` or
+    empty, or the payload is not a dict / has no dict ``fields``, returns the
+    input unchanged. When filtering applies, returns a new dict with a new
+    ``fields`` mapping.
+    """
+    if not isinstance(deserialized_data, dict):
+        return deserialized_data
+
+    if requested_fields is None or (
+        isinstance(requested_fields, (list, tuple, set)) and len(requested_fields) == 0
+    ):
+        return deserialized_data
+
+    if "fields" not in deserialized_data:
+        return deserialized_data
+
+    fields = deserialized_data.get("fields")
+    if not isinstance(fields, dict):
+        return deserialized_data
+
+    exposed_fields = {
+        field: fields[field]
+        for field in requested_fields
+        if field in fields
+    }
+    out = dict(deserialized_data)
+    out["fields"] = exposed_fields
+    return out

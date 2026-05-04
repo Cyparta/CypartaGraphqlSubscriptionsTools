@@ -79,9 +79,11 @@ CYPARTA_WS_OUTBOX_MAXSIZE = 512
 
 # Subscription group access (default: require authenticated scope["user"]).
 CYPARTA_WS_REQUIRE_AUTH = True
-# Optional dotted path to a class instantiated per check. It must define
-# has_permission(self, user, group_name, operation_id=None, scope=None, variables=None) -> bool
-# (method may be sync or async).
+# Optional dotted path to a class: one instance is cached per WebSocket connection.
+# It must define:
+#   has_permission(self, user, group_name, operation_id=None, scope=None, variables=None) -> bool
+# (method may be sync or async). Group registration is all-or-nothing per call: if any
+# requested group is denied, none of the groups in that call are joined.
 # CYPARTA_WS_GROUP_PERMISSION_CLASS = "myapp.permissions.SubscriptionGroupPermission"
 ```
 
@@ -187,7 +189,9 @@ schema = graphene.Schema(query=Query, subscription=Subscription)
 1. **Negotiate subprotocol** — the handshake must include **`Sec-WebSocket-Protocol: graphql-transport-ws`** or **`graphql-ws`**. Unsupported values are rejected with close code **`1002`**.
 2. **`connection_init`** — send first; the server replies with **`connection_ack`** and only then accepts **`subscribe`**.
 3. **`subscribe`** — must include a string **`id`** (GraphQL transport operation id). If **`subscribe`** arrives before **`connection_init`**, the socket is closed with **`4401`**.
-4. **`complete`** — may be sent even before **`connection_init`** only when an **`id`** is present; the server tears down that operation and sends **`{"type": "complete", "id": "<id>"}`** when applicable.
+4. **Ending an operation** — **`graphql-transport-ws`**: client sends **`complete`** with **`id`**; the server tears down that operation and replies with **`{"type": "complete", "id": "<id>"}`**. **`graphql-ws`** (Apollo legacy): client sends **`stop`** with **`id`**; the server still completes the operation with an outbound **`{"type": "complete", "id": "<id>"}`** (same as subscription-transport-ws). A **`complete`** / teardown message may be processed even before **`connection_init`** when an **`id`** is present.
+5. **`ping` / `pong`** — on **`graphql-transport-ws`**, a client **`ping`** is answered with **`{"type": "pong"}`**; **`pong`** is ignored.
+6. **`connection_terminate`** — closes the WebSocket (code **1000**).
 
 Ping / keepalive: the server periodically sends **`ping`** (transport-ws) or **`ka`** (graphql-ws).
 
@@ -214,7 +218,7 @@ async_to_sync(root.detect_register_group_status)(
 )
 ```
 
-**`requested_fields`** — when not `None`, only those keys are kept under the serialized `fields` dict in the pushed payload (see `filter_requested_fields` in `utils.py`).
+**`requested_fields`** — when not `None` and non-empty, only those keys are kept under the serialized `fields` dict in the pushed payload (see `filter_requested_fields` in `utils.py`). The helper never mutates the event dict; invalid shapes are passed through unchanged.
 
 **Group names** — align with what you pass to **`trigger_subscription`** (see below). The mixin uses:
 

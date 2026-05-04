@@ -12,7 +12,11 @@
 
 - **`views.graphql_token_view`** uses **`graphene_settings.SCHEMA`** from **`GRAPHENE["SCHEMA"]`** instead of importing a package-level schema module.
 - **`setup.py`** lists explicit packages only (core app + migrations); **`examples/`** and **`tests/`** are not installed as top-level site-packages.
-- **`CYPARTA_WS_GROUP_PERMISSION_CLASS`** — load a class by dotted path, **instantiate** it, and call **`has_permission(self, user, group_name, operation_id=None, scope=None, variables=None)`** (sync or async). **`CYPARTA_WS_GROUP_PERMISSION_CALLBACK`** and static **`can_subscribe_to_group`** on the permission class are no longer used.
+- **`CYPARTA_WS_GROUP_PERMISSION_CLASS`** — load a class by dotted path, **instantiate once per WebSocket connection** (cached), and call **`has_permission(self, user, group_name, operation_id=None, scope=None, variables=None)`** (sync or async). Import or **`has_permission`** errors deny the subscription, log a server-side traceback, and surface a generic GraphQL error (no group names or private IDs in the client message). **`CYPARTA_WS_GROUP_PERMISSION_CALLBACK`** and static **`can_subscribe_to_group`** on the permission class are not supported.
+- **Group registration** — all-or-nothing per **`detect_register_group_status`** / **`register_group`** call: if any group in **`name_list`** is denied, **none** of those groups are joined for that operation; **`_group_ops`** / **`state.groups`** stay consistent; one GraphQL error is emitted.
+- **`filter_requested_fields`** — no in-place mutation; returns the input unchanged when **`requested_fields`** is **`None`** or empty, when the payload is not a dict, or when **`fields`** is missing or not a dict.
+- **WebSocket control messages** — **`ping`** → **`pong`**; **`pong`** ignored; **`connection_terminate`** closes the socket (**1000**).
+- **Operation teardown** — outbound completion uses the protocol’s server frame (**`complete`**) rather than the client’s legacy **`stop`** type.
 
 ## 4.0.2
 

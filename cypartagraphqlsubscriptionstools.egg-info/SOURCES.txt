@@ -25,5 +25,7 @@ tests/__init__.py
 tests/conftest.py
 tests/django_settings.py
 tests/test_consumer_production.py
+tests/test_filter_requested_fields.py
 tests/test_package_import.py
+tests/test_receive_json_validation.py
 tests/test_ws_permissions.py
