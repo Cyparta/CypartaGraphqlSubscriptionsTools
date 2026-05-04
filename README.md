@@ -1,56 +1,60 @@
 # CypartaGraphqlSubscriptionsTools
 
-Graphene + Django GraphQL **subscriptions** over **Django Channels** (async WebSockets). Supports **`graphql-transport-ws`** and **`graphql-ws`** via the `Sec-WebSocket-Protocol` header.
+![CypartaGraphqlSubscriptionsTools cover](cover.jpg)
 
-For background on the two protocols, see [GraphQL over WebSockets: subscription-transport-ws vs graphql-ws](https://wundergraph.com/blog/quirks_of_graphql_subscriptions_sse_websockets_hasura_apollo_federation_supergraph#graphql-subscriptions-over-websockets:-subscription-transport-ws-vs-graphql-ws).
+**Version 4.1.4**
+
+Graphene + Django **GraphQL subscriptions** over **Django Channels** (async WebSockets). The package ships a production-oriented consumer that speaks:
+
+- **[graphql-transport-ws](https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md)** — negotiate with WebSocket subprotocol `graphql-transport-ws` (recommended).
+- **Legacy [graphql-ws](https://github.com/apollographql/subscriptions-transport-ws/blob/master/PROTOCOL.md)** — subprotocol `graphql-ws` (Apollo-style `start` / `stop` / `data`).
+
+The server selects the protocol from the `Sec-WebSocket-Protocol` header. Your GraphQL schema, models, and routing live **in your Django project** — not inside this library.
+
+### Architecture overview
+
+![Subscription flow and components](graph.jpg)
 
 ---
 
-## What you get (v4.1.4)
+## Features
 
-- **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`) and optional **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** (`drop_newest`, `drop_oldest`, or `close_connection` with close code **4413**).
-- **Multi-operation aware** — each client `subscribe` uses a transport **`id`**; groups and payloads are keyed per operation (`_ops` / `_group_ops`).
-- **Live payload shape** — each event is sent as GraphQL `ExecutionResult` data shaped as **`{ "<responseKey>": value }`**, where **response key** is the subscription root field’s **alias** if present, otherwise the **field name** (from `graphql.parse`).
-- **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, **`subscribe`**, legacy **`subscripe`**, and **`deprecationNotes`** only when the legacy positional **`subscripe`** was used without **`subscribe=`**).
-- **Channel group names** — validated against Django Channels rules before **`group_add`** / **`group_discard`** / **`group_send`** (see **`validate_group_name`** in `utils.py`; **`CYPARTA_WS_STRICT_GROUP_NAMES`** defaults to **`True`**).
-- **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** schedules **`trigger_subscription`** on **`transaction.on_commit`** (no publish on rollback), per-group error isolation, and optional **`get_subscription_payload`**. Optional **`CYPARTA_WS_EVENT_SERIALIZER`** (cached by path), **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**, and **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`** for server-side publishes.
+- **WebSocket GraphQL subscriptions** — JSON messages, `connection_init` gating, per-operation `id`, GraphQL errors over the wire.
+- **Per-connection bounded outbox** — `asyncio.Queue` plus one sender task so slow clients cannot grow an unbounded send backlog (`CYPARTA_WS_OUTBOX_MAXSIZE`).
+- **Multi-operation support** — each `subscribe` / `start` operation has its own `id`; channel groups map to operation ids (`_ops` / `_group_ops`).
+- **Optional group permission class** — dotted path to a class with `has_permission(...)` for per-group authorization (`CYPARTA_WS_GROUP_PERMISSION_CLASS`).
+- **Group name validation** — names validated like Django Channels `BaseChannelLayer.valid_group_name` (`validate_group_name`, `CYPARTA_WS_STRICT_GROUP_NAMES`).
+- **Optional model lifecycle mixin** — `CypartaSubscriptionModelMixin` schedules `trigger_subscription` on `transaction.on_commit` (create / update / delete hooks via `django_lifecycle`).
+- **Custom event serializer** — optional `CYPARTA_WS_EVENT_SERIALIZER` callable for server-side `trigger_subscription` payloads; import path cached until `reset_event_serializer_cache()`.
+- **Outbox overflow strategy** — when the queue is full: `drop_newest` (default), `drop_oldest`, or `close_connection` (WebSocket close code **4413**).
 
 ---
 
-## Requirements
+## Installation
 
-- Python **≥ 3.9**
-- **Django**, **Graphene / graphene-django**, **Channels**, **django-lifecycle** (see `setup.py` / `requirements.txt` for pinned versions in this repo).
-
-Install:
+From [PyPI](https://pypi.org/project/cypartagraphqlsubscriptionstools/):
 
 ```bash
 pip install cypartagraphqlsubscriptionstools
 ```
 
-Or from source:
+From a git checkout (editable):
 
 ```bash
 pip install -e .
 ```
 
-The wheel includes only **`CypartaGraphqlSubscriptionsTools`** (and its empty **`migrations`** package). It does **not** ship demo models, demo GraphQL schema, or the **`examples/`** tree—those live in the repository for reference when you clone the project.
+Install test dependencies:
+
+```bash
+pip install -e ".[test]"
+```
 
 ---
 
-## Your models and schema (production)
+## Quick start
 
-1. **Models** — The library does **not** define tables. In your Django app (e.g. `myapp/models.py`), add normal models and optionally inherit **`CypartaSubscriptionModelMixin`** from **`CypartaGraphqlSubscriptionsTools.mixins`** so lifecycle hooks call **`trigger_subscription`** with the same group naming you use in subscription resolvers.
-
-2. **GraphQL schema** — Define **`Query`**, **`Subscription`**, and **`schema = graphene.Schema(...)`** in your project (e.g. **`myapp/schema.py`**). Point **`GRAPHENE["SCHEMA"]`** at that module. Subscription resolvers use **`async_to_sync(root.detect_register_group_status)(...)`** as documented below.
-
-3. **Demo copy-paste** — See **`examples/basic_django_app/`** in the repo for a minimal **`MyModel`** + **`schema.py`**. From a checkout you can add **`"examples.basic_django_app.apps.BasicDjangoAppConfig"`** to **`INSTALLED_APPS`** (see **`examples/README.md`**); this is not part of the PyPI wheel.
-
----
-
-## 1. Install and enable the app
-
-Add the app to **`INSTALLED_APPS`**:
+### 1. Register the app
 
 ```python
 # settings.py
@@ -58,13 +62,15 @@ INSTALLED_APPS = [
     # ...
     "channels",
     "CypartaGraphqlSubscriptionsTools",
+    "articles",  # your app
 ]
 ```
 
-Configure **channel layers** (Redis for production; in-memory is fine for local dev):
+### 2. Channel layers
+
+**In-memory (development / tests):**
 
 ```python
-# settings.py
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels.layers.InMemoryChannelLayer",
@@ -72,134 +78,224 @@ CHANNEL_LAYERS = {
 }
 ```
 
-Optional:
+**Redis (typical production):**
 
 ```python
-# Max queued outbound messages per WebSocket before drops (default 256).
-CYPARTA_WS_OUTBOX_MAXSIZE = 512
-
-# Subscription group access (default: require authenticated scope["user"]).
-CYPARTA_WS_REQUIRE_AUTH = True
-# Optional dotted path to a class: one instance is cached per WebSocket connection.
-# It must define:
-#   has_permission(self, user, group_name, operation_id=None, scope=None, variables=None) -> bool
-# (method may be sync or async). Group registration is all-or-nothing per call: if any
-# requested group is denied, none of the groups in that call are joined.
-# CYPARTA_WS_GROUP_PERMISSION_CLASS = "myapp.permissions.SubscriptionGroupPermission"
-
-# Reject invalid channel group names (default True). When False, unsafe characters
-# are normalized to underscores before join/send (still must yield a valid name).
-CYPARTA_WS_STRICT_GROUP_NAMES = True
-
-# Optional: dotted path to async or sync callable(value, group=None, scope=None)
-# for channel payloads from trigger_subscription. Default uses serialize_value.
-# CYPARTA_WS_EVENT_SERIALIZER = "myapp.ws.event_serialize.serialize_subscription_event"
-
-# If True, trigger_subscription raises GroupNameInvalid on bad group names (default False).
-# CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP = False
-
-# If True, skip group_send when both custom and default serialization fail (default False).
-# CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR = False
-
-# Outbox full policy: "drop_newest" (default), "drop_oldest", or "close_connection" (4413).
-# CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY = "drop_newest"
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("127.0.0.1", 6379)],
+        },
+    },
+}
 ```
 
-### Recommended production settings
+Install `channels-redis` when using the Redis backend.
 
-These are not defaults for every project, but they are a sensible baseline for locked-down, predictable behavior:
+### 3. Graphene schema
 
-| Setting | Recommended | Why |
-|--------|-------------|-----|
-| **`CYPARTA_WS_REQUIRE_AUTH`** | **`True`** | Ensures subscription group joins map to an authenticated `scope["user"]` unless you intentionally expose public feeds. |
-| **`CYPARTA_WS_STRICT_GROUP_NAMES`** | **`True`** | Rejects invalid Django Channels group strings at the boundary instead of normalizing unexpected input. |
-| **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`** | **`True`** | Avoids publishing payloads when both the custom serializer (if any) and **`serialize_value`** fail; the event is skipped and the failure is logged. |
-
-**Outbox overflow strategy (`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`)** — pick based on how stale data should behave:
-
-- **Dashboards / live metrics** — clients often only need the **latest** update. Prefer **`drop_oldest`**: when the outbox is full, the oldest queued message is discarded so newer ticks can be enqueued. Alternatively keep **`drop_newest`** and reduce **`CYPARTA_WS_OUTBOX_MAXSIZE`** if you prefer to drop only the newest overflow and retain older queued frames.
-- **Chat / notification-style feeds** — usually keep the default **`drop_newest`** so a backlog of older messages is not silently discarded when one slow client fills the queue. If you only care about the most recent N messages, **`drop_oldest`** is also reasonable.
-- **`close_connection`** — disconnects the socket (code **4413**) when the outbox is full; use when you want to shed pathological slow clients and force a reconnect rather than dropping silently.
-
-Point **`ASGI_APPLICATION`** at your routing module (see below).
-
----
-
-## 2. Wire ASGI and WebSocket routing
-
-Mount **`CypartaGraphqlSubscriptionsConsumer`** on a URL your GraphQL WS client will use.
-
-**Option A — reuse the package URL patterns**
+Point Django Graphene at **your** schema object (define `Query`, `Subscription`, and `schema` in your project — for example `articles.schema`):
 
 ```python
-# your_project/routing.py
-from channels.routing import URLRouter
-from django.urls import path
-
-from CypartaGraphqlSubscriptionsTools.routing import websocket_urlpatterns
-
-# Or merge with your own patterns:
-urlpatterns_websocket = [
-    *websocket_urlpatterns,
-    # path("ws/other/", OtherConsumer.as_asgi()),
-]
+# settings.py
+GRAPHENE = {
+    "SCHEMA": "articles.schema.schema",
+}
 ```
 
-**Option B — single explicit path**
+### 4. ASGI: HTTP + WebSocket consumer
+
+Mount **`CypartaGraphqlSubscriptionsConsumer`** on a URL your clients use (here `/ws/graphql/`).
 
 ```python
-from django.urls import path
+# articles/routing.py
+from django.urls import re_path
+
 from CypartaGraphqlSubscriptionsTools.consumers import CypartaGraphqlSubscriptionsConsumer
 
 websocket_urlpatterns = [
-    path("graphql/", CypartaGraphqlSubscriptionsConsumer.as_asgi()),
+    re_path(r"^ws/graphql/$", CypartaGraphqlSubscriptionsConsumer.as_asgi()),
 ]
 ```
 
-**ASGI entry** (typical pattern):
-
 ```python
-# your_project/asgi.py
+# asgi.py
 import os
 
 from channels.auth import AuthMiddlewareStack
 from channels.routing import ProtocolTypeRouter, URLRouter
 from django.core.asgi import get_asgi_application
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "your_project.settings")
+from articles.routing import websocket_urlpatterns
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
+
 django_asgi_app = get_asgi_application()
 
-from your_project.routing import urlpatterns_websocket  # adjust import
-
-application = ProtocolTypeRouter({
-    "http": django_asgi_app,
-    "websocket": AuthMiddlewareStack(URLRouter(urlpatterns_websocket)),
-})
+application = ProtocolTypeRouter(
+    {
+        "http": django_asgi_app,
+        "websocket": AuthMiddlewareStack(URLRouter(websocket_urlpatterns)),
+    }
+)
 ```
 
-```python
-# settings.py
-ASGI_APPLICATION = "your_project.asgi.application"
-```
+Set **`ASGI_APPLICATION = "myproject.asgi.application"`** in `settings.py`.
 
 ---
 
-## 3. Point Graphene at your schema
+## Recommended production settings
 
-The consumer runs subscriptions with **`graphene_settings.SCHEMA`**:
+Use stricter defaults in production unless you have a deliberate reason not to:
 
 ```python
 # settings.py
-GRAPHENE = {
-    "SCHEMA": "your_project.schema.schema",
-}
+
+CYPARTA_WS_REQUIRE_AUTH = True
+CYPARTA_WS_STRICT_GROUP_NAMES = True
+CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR = True
+
+CYPARTA_WS_GROUP_PERMISSION_CLASS = "articles.permissions.SubscriptionGroupPermission"
+
+# Dashboards / live metrics: prefer latest snapshot when client lags
+CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY = "drop_oldest"
+
+# Chat / notifications: keep older queued messages; drop only newest on overflow (default)
+# CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY = "drop_newest"
+
+# Shed pathological slow clients (disconnect with code 4413 when outbox stays full)
+# CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY = "close_connection"
 ```
 
-```python
-# your_project/schema.py
-import graphene
+### Settings reference
 
-from your_app.graphql.subscriptions import Subscription as AppSubscription
+| Setting | Role |
+|--------|------|
+| **`CYPARTA_WS_OUTBOX_MAXSIZE`** | Max queued outbound `ExecutionResult` frames per WebSocket (default **256**). When full, overflow policy applies. |
+| **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** | **`drop_newest`** (default): refuse enqueue of the newest event. **`drop_oldest`**: remove oldest queued item then enqueue. **`close_connection`**: schedule one close per socket with code **4413**. |
+| **`CYPARTA_WS_REQUIRE_AUTH`** | If **`True`** (default), anonymous or missing `scope["user"]` cannot join subscription groups. |
+| **`CYPARTA_WS_GROUP_PERMISSION_CLASS`** | Optional dotted path to a permission class (instantiated once per connection) implementing **`has_permission(self, user, group_name, operation_id=None, scope=None, variables=None)`** (sync or async). |
+| **`CYPARTA_WS_STRICT_GROUP_NAMES`** | If **`True`** (default), invalid group strings raise a generic GraphQL error. If **`False`**, unsafe characters are normalized to **`_`** where possible. |
+| **`CYPARTA_WS_EVENT_SERIALIZER`** | Optional dotted path: **`(value, group=None, scope=None)`** returning the wire payload (sync, async, or awaitable). |
+| **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`** | If **`True`**, failed custom + default serialization skips **`group_send`** for that event (logged). |
+| **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`** | If **`True`**, **`trigger_subscription`** raises **`GroupNameInvalid`** on bad names instead of skipping. |
+
+**Outbox strategy hints**
+
+- **Dashboards / live metrics** — often use **`drop_oldest`** so the socket keeps newer updates when the client falls behind.
+- **Chat / notifications** — often keep **`drop_newest`** so older queued messages are not discarded silently.
+- **`close_connection`** — disconnect slow clients (code **4413**) so they reconnect rather than staying in a bad state.
+
+---
+
+## Complete example: Articles app
+
+Below, **`articles`** is your Django app. Adjust imports and model fields to your project.
+
+### Model (`articles/models.py`)
+
+```python
+from django.conf import settings
+from django.db import models
+from django_lifecycle import LifecycleModelMixin
+
+from CypartaGraphqlSubscriptionsTools.mixins import CypartaSubscriptionModelMixin
+
+
+class Article(LifecycleModelMixin, CypartaSubscriptionModelMixin, models.Model):
+    title = models.CharField(max_length=255)
+    body = models.TextField(blank=True)
+    is_public = models.BooleanField(default=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="articles",
+    )
+
+    def get_subscription_group_names(self, action):
+        if action == "create":
+            return ["ArticleCreated"]
+        if action == "update":
+            return [f"ArticleUpdated.{self.pk}"]
+        if action == "delete":
+            return [f"ArticleDeleted.{self.pk}"]
+        return []
+
+    def get_subscription_payload(self, action):
+        return self
+```
+
+### GraphQL types and subscriptions (`articles/schema.py`)
+
+```python
+import graphene
+from asgiref.sync import async_to_sync
+from graphene_django.types import DjangoObjectType
+
+from .models import Article
+
+
+class ArticleType(DjangoObjectType):
+    class Meta:
+        model = Article
+
+
+class ArticleSubscription(graphene.ObjectType):
+    """Subscription root fields; ``root`` in resolvers is the WebSocket consumer."""
+
+    article_created = graphene.Field(ArticleType, subscribe=graphene.Boolean())
+
+    def resolve_article_created(root, info, subscribe=True):
+        node = info.field_nodes[0]
+        selections = node.selection_set.selections if node.selection_set else ()
+        requested_fields = [
+            sel.name.value for sel in selections if hasattr(sel, "name")
+        ]
+        return async_to_sync(root.detect_register_group_status)(
+            ["ArticleCreated"],
+            requested_fields=requested_fields,
+            variables=info.variable_values,
+            subscribe=subscribe,
+        )
+
+    article_updated = graphene.Field(
+        ArticleType,
+        id=graphene.String(required=True),
+        subscribe=graphene.Boolean(),
+    )
+
+    def resolve_article_updated(root, info, id, subscribe=True):
+        node = info.field_nodes[0]
+        selections = node.selection_set.selections if node.selection_set else ()
+        requested_fields = [
+            sel.name.value for sel in selections if hasattr(sel, "name")
+        ]
+        return async_to_sync(root.detect_register_group_status)(
+            [f"ArticleUpdated.{id}"],
+            requested_fields=requested_fields,
+            variables=info.variable_values,
+            subscribe=subscribe,
+        )
+
+    article_deleted = graphene.Field(
+        ArticleType,
+        id=graphene.String(required=True),
+        subscribe=graphene.Boolean(),
+    )
+
+    def resolve_article_deleted(root, info, id, subscribe=True):
+        node = info.field_nodes[0]
+        selections = node.selection_set.selections if node.selection_set else ()
+        requested_fields = [
+            sel.name.value for sel in selections if hasattr(sel, "name")
+        ]
+        return async_to_sync(root.detect_register_group_status)(
+            [f"ArticleDeleted.{id}"],
+            requested_fields=requested_fields,
+            variables=info.variable_values,
+            subscribe=subscribe,
+        )
 
 
 class Query(graphene.ObjectType):
@@ -209,182 +305,331 @@ class Query(graphene.ObjectType):
         return "world"
 
 
-class Subscription(AppSubscription):
+class Subscription(ArticleSubscription, graphene.ObjectType):
     pass
 
 
 schema = graphene.Schema(query=Query, subscription=Subscription)
 ```
 
----
-
-## 4. WebSocket protocol (what the client must do)
-
-1. **Negotiate subprotocol** — the handshake must include **`Sec-WebSocket-Protocol: graphql-transport-ws`** or **`graphql-ws`**. Unsupported values are rejected with close code **`1002`**.
-2. **`connection_init`** — send first; the server replies with **`connection_ack`** and only then accepts **`subscribe`**. A second **`connection_init`** on the same socket is rejected with close code **`4429`**.
-3. **`subscribe`** — must include a string **`id`** (GraphQL transport operation id). If **`subscribe`** arrives before **`connection_init`**, the socket is closed with **`4401`**.
-4. **Ending an operation** — **`graphql-transport-ws`**: client sends **`complete`** with **`id`**; the server tears down that operation and replies with **`{"type": "complete", "id": "<id>"}`**. **`graphql-ws`** (Apollo legacy): client sends **`stop`** with **`id`**; the server still completes the operation with an outbound **`{"type": "complete", "id": "<id>"}`** (same as subscription-transport-ws). A **`complete`** / teardown message may be processed even before **`connection_init`** when an **`id`** is present.
-5. **`ping` / `pong`** — on **`graphql-transport-ws`**, a client **`ping`** is answered with **`{"type": "pong"}`**; **`pong`** is ignored.
-6. **`connection_terminate`** — closes the WebSocket (code **1000**).
-
-Ping / keepalive: the server periodically sends **`ping`** (transport-ws) or **`ka`** (graphql-ws).
+**Note:** Prefer the **`subscribe`** keyword (GraphQL argument and/or **`detect_register_group_status(..., subscribe=...)`**). The legacy positional **`subscripe`** flag is still accepted on **`detect_register_group_status`**, **`register_group`**, and **`un_register_group`** for backward compatibility; if you use **`subscripe`** without **`subscribe`**, **`extensions.cyparta`** may include **`deprecationNotes`**.
 
 ---
 
-## 5. Writing subscription resolvers
+## Permission class example
 
-Inside a subscription resolver, **`root`** is the **`CypartaGraphqlSubscriptionsConsumer`** instance. Join or leave channel groups with **`detect_register_group_status`**. Because the consumer is async, call it from sync Graphene code with **`async_to_sync`**:
+`has_permission` receives the Django user from **`scope["user"]`**, the validated channel group name, the GraphQL operation id, the ASGI scope, and subscription variables (when provided).
+
+```python
+# articles/permissions.py
+from channels.db import database_sync_to_async
+from django.contrib.auth.models import AnonymousUser
+
+from .models import Article
+
+
+class SubscriptionGroupPermission:
+    async def has_permission(self, user, group_name, operation_id=None, scope=None, variables=None):
+        if user is None or isinstance(user, AnonymousUser) or getattr(user, "is_anonymous", True):
+            return False
+
+        if group_name == "ArticleCreated":
+            return True
+
+        if group_name.startswith("ArticleUpdated.") or group_name.startswith("ArticleDeleted."):
+            _prefix, pk_str = group_name.split(".", 1)  # e.g. ArticleUpdated.7 -> pk_str == "7"
+            try:
+                pk = int(pk_str)
+            except ValueError:
+                return False
+
+            article = await database_sync_to_async(
+                lambda: Article.objects.filter(pk=pk).first()
+            )()
+            if article is None:
+                return False
+            if article.is_public:
+                return True
+            return article.owner_id == getattr(user, "pk", None)
+
+        return False
+```
+
+```python
+# settings.py
+CYPARTA_WS_GROUP_PERMISSION_CLASS = "articles.permissions.SubscriptionGroupPermission"
+```
+
+---
+
+## Custom event serializer example
+
+Normalize or redact payloads before **`group_send`**. Signature: **`value`**, optional **`group`**, optional **`scope`** (sync or async).
+
+```python
+# articles/ws_serializers.py
+def serialize_subscription_event(value, group=None, scope=None):
+    if hasattr(value, "_meta") and hasattr(value, "pk"):
+        return {"kind": "article", "id": value.pk, "title": getattr(value, "title", "")}
+    if isinstance(value, dict):
+        return value
+    return str(value)
+```
+
+```python
+# settings.py
+CYPARTA_WS_EVENT_SERIALIZER = "articles.ws_serializers.serialize_subscription_event"
+CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR = True
+```
+
+The serializer import is **cached** by dotted path. After changing **`CYPARTA_WS_EVENT_SERIALIZER`** in tests or at runtime, call:
+
+```python
+from CypartaGraphqlSubscriptionsTools import events
+
+events.reset_event_serializer_cache()
+```
+
+---
+
+## Manual publishing
+
+From synchronous code (views, signals, management commands), publish to every socket in a channel group:
 
 ```python
 from asgiref.sync import async_to_sync
-from CypartaGraphqlSubscriptionsTools.utils import get_model_name_instance
-```
 
-Typical pattern (preferred — keyword **`subscribe`** only):
-
-```python
-async_to_sync(root.detect_register_group_status)(
-    [f"{model_name}Created"],
-    requested_fields=requested_fields,
-    variables=info.variable_values,
-    subscribe=subscripe,   # map from your GraphQL argument name
-)
-```
-
-Legacy positional **`subscripe`** remains supported as the second argument; **`deprecationNotes`** are sent only in that case when **`subscribe`** is not passed:
-
-```python
-async_to_sync(root.detect_register_group_status)(
-    name_list,
-    subscripe,           # optional positional: True = join, False = leave
-    requested_fields=None,
-    operation_id=None,
-    variables=None,
-    subscribe=None,     # if set, overrides positional ``subscripe``
-)
-```
-
-**`requested_fields`** — when not `None` and non-empty, only those keys are kept under the serialized `fields` dict in the pushed payload (see `filter_requested_fields` in `utils.py`). The helper never mutates the event dict; invalid shapes are passed through unchanged.
-
-**Group names** — must satisfy Django Channels naming rules (ASCII letters, digits, **`-`**, **`_`**, **`.`**, length strictly below **100**). Use **`validate_group_name`** from **`utils.py`** if you build names dynamically. Align names with **`trigger_subscription`** (see below). The mixin uses:
-
-- `{ModelName}Created`
-- `{ModelName}Updated.{pk}`
-- `{ModelName}Deleted.{pk}`
-
-### Example: model created
-
-```python
-import graphene
-from asgiref.sync import async_to_sync
-from graphene_django.types import DjangoObjectType
-
-from CypartaGraphqlSubscriptionsTools.utils import get_model_name_instance
-from your_app.models import MyModel
-
-
-class MyModelType(DjangoObjectType):
-    class Meta:
-        model = MyModel
-
-
-class Subscription(graphene.ObjectType):
-    my_model_created = graphene.Field(MyModelType, subscripe=graphene.Boolean(required=True))
-
-    def resolve_my_model_created(root, info, subscripe):
-        requested_fields = [
-            s.name.value for s in info.field_nodes[0].selection_set.selections
-        ]
-        model_name = get_model_name_instance(MyModelType)
-        return async_to_sync(root.detect_register_group_status)(
-            [f"{model_name}Created"],
-            requested_fields=requested_fields,
-            subscribe=subscripe,
-        )
-```
-
-Use the same idea for **`Updated` / `Deleted`** with groups like `f"{model_name}Updated.{id}"` (match your client arguments and your **`trigger_subscription`** calls).
-
----
-
-## 6. Model mixin (optional)
-
-Subclass **`CypartaSubscriptionModelMixin`** so creates / updates / deletes emit channel events (requires **django-lifecycle** on the model). Publishes are scheduled with **`django.db.transaction.on_commit`**, so events are not sent if the surrounding transaction rolls back.
-
-```python
-# your_app/models.py
-from django.db import models
-from CypartaGraphqlSubscriptionsTools.mixins import CypartaSubscriptionModelMixin
-
-
-class Article(CypartaSubscriptionModelMixin, models.Model):
-    title = models.CharField(max_length=200)
-```
-
-Optional hooks (override on your model):
-
-- **`should_publish_subscription_event(self, action: str) -> bool`** — `action` is **`"create"`**, **`"update"`**, or **`"delete"`**; return **`False`** to skip scheduling.
-- **`get_subscription_group_names(self, action: str) -> list[str]`** — default names: **`{ModelName}Created`**, **`{ModelName}Updated.{pk}`**, **`{ModelName}Deleted.{pk}`**.
-- **`get_subscription_payload(self, action: str)`** — value passed to **`trigger_subscription`** for each group (default **`self`**).
-
-When **`CYPARTA_WS_EVENT_SERIALIZER`** changes at runtime (e.g. in tests), call **`CypartaGraphqlSubscriptionsTools.events.reset_event_serializer_cache()`** so the new dotted path is loaded.
-
----
-
-## 7. Publishing events from your code
-
-Use **`trigger_subscription`** to send a message to everyone in a channel group. Values that are **`models.Model`** instances are passed through **`serialize_value`** by default (JSON serialize + shape with `pk`, `fields`, optional `group`). Set **`CYPARTA_WS_EVENT_SERIALIZER`** to a dotted path for a custom **`(value, group=None, scope=None)`** callable (sync or async); errors are logged and the stack falls back to **`serialize_value`** then plain JSON-safe values where possible.
-
-```python
-from asgiref.sync import async_to_sync
 from CypartaGraphqlSubscriptionsTools.events import trigger_subscription
+from .models import Article
 
 
-async_to_sync(trigger_subscription)("MyModelCreated", instance)
+def notify_article_updated(article: Article):
+    async_to_sync(trigger_subscription)(f"ArticleUpdated.{article.pk}", article)
 ```
 
-Custom group names work as long as subscription resolvers register the same strings.
+`trigger_subscription` validates the group name, serializes **`value`** (custom serializer if configured), then **`group_send`**. Use **`validate_group_name`** if you need to pre-validate strings in your own code.
 
 ---
 
-## 8. Optional WebSocket auth middleware
+## Client examples
 
-The package includes **`TokenAuthMiddleware`** (`Authorization: Token <key>` → sets `scope["user"]`). It expects **Django REST framework**’s **`Token`** model to be available if you use it:
+Subprotocol must be requested by the client (`Sec-WebSocket-Protocol`). All frames are JSON objects.
+
+### graphql-transport-ws
+
+1. **`connection_init`** — must be sent first; server replies **`connection_ack`**.
+2. **`subscribe`** — includes **`id`** and **`payload`** (`query`, optional `variables`, optional `operationName`).
+3. Registration ack — first **`next`** frame often has **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, `subscribe`, …).
+4. Live event — **`next`** with **`payload.data`** shaped as **`{ "<responseKey>": <serialized value> }`** (response key = field alias or field name).
+5. **`complete`** — client stops the operation; server may also send **`complete`** with the same **`id`**.
+
+Example sequence (illustrative payloads):
+
+```json
+{"type": "connection_init"}
+```
+
+```json
+{"type": "connection_ack"}
+```
+
+```json
+{
+  "id": "1",
+  "type": "subscribe",
+  "payload": {
+    "query": "subscription { articleUpdated(id: \"5\") { id title } }",
+    "variables": {}
+  }
+}
+```
+
+```json
+{
+  "id": "1",
+  "type": "next",
+  "payload": {
+    "data": null,
+    "errors": null,
+    "extensions": {
+      "cyparta": {
+        "action": "register",
+        "registeredGroups": ["ArticleUpdated.5"],
+        "subscribe": true,
+        "subscripe": true
+      }
+    }
+  }
+}
+```
+
+```json
+{
+  "id": "1",
+  "type": "next",
+  "payload": {
+    "data": {
+      "articleUpdated": {
+        "pk": 5,
+        "fields": {"id": 5, "title": "Hello", "body": "..."},
+        "group": "ArticleUpdated.5"
+      }
+    },
+    "errors": null
+  }
+}
+```
+
+```json
+{"id": "1", "type": "complete"}
+```
+
+### Legacy graphql-ws
+
+Same ordering rule: **`connection_init`** before **`start`**.
+
+```json
+{"type": "connection_init"}
+```
+
+```json
+{"type": "connection_ack"}
+```
+
+```json
+{
+  "id": "1",
+  "type": "start",
+  "payload": {
+    "query": "subscription { articleUpdated(id: \"5\") { id title } }",
+    "variables": {}
+  }
+}
+```
+
+```json
+{"id": "1", "type": "stop"}
+```
+
+```json
+{"type": "connection_terminate"}
+```
+
+Legacy protocol uses **`data`** instead of **`next`** for result frames; errors use a single error object in **`payload`** instead of an array.
+
+---
+
+## Group names
+
+Rules align with Django Channels **`BaseChannelLayer.valid_group_name`**:
+
+- **Type:** non-empty **string** only at the API boundary.
+- **Length:** strictly less than the Channels maximum name length.
+- **Characters:** ASCII **`a-z`**, **`A-Z`**, **`0-9`**, **`_`**, **`-`**, **`.`** only when **`CYPARTA_WS_STRICT_GROUP_NAMES`** is **`True`** (default).
+
+| Example | Valid? |
+|--------|--------|
+| `ArticleCreated` | Yes |
+| `ArticleUpdated.42` | Yes |
+| `my-feed_v1` | Yes |
+| `` (empty) | No |
+| `Article Updated` (space) | No (strict); normalized with underscores if strict is **`False`** |
+| `bad/slash` | No (strict) |
+
+In Python:
 
 ```python
-# asgi.py (excerpt)
-from channels.auth import AuthMiddlewareStack
-from channels.routing import URLRouter
+from CypartaGraphqlSubscriptionsTools.utils import GroupNameInvalid, validate_group_name
 
-from CypartaGraphqlSubscriptionsTools.middleware import TokenAuthMiddleware
-from your_project.routing import urlpatterns_websocket
-
-application = ProtocolTypeRouter({
-    "http": django_asgi_app,
-    "websocket": AuthMiddlewareStack(
-        TokenAuthMiddleware(URLRouter(urlpatterns_websocket))
-    ),
-})
+try:
+    safe = validate_group_name("ArticleUpdated.1")
+except GroupNameInvalid as exc:
+    # exc.client_message is safe for clients
+    ...
 ```
 
 ---
 
-## 9. Upgrading from older releases
+## Authentication
 
-- **v4.1.4** — **`drop_oldest`** outbox path calls **`task_done()`** after **`get_nowait()`** (safe for future **`join()`**); overflow close scheduled at most once per socket; **`_safe_passthrough`** stringifies dict keys; README **Recommended production settings** (auth, strict names, drop-on-serialize-error, outbox strategy guidance).
-- **v4.1.3** — Serializer import caching; **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**; mixin **`get_subscription_payload`** and per-group publish **`try`/`except`**; **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** for full outbox.
-- **v4.1.2** — **`subscribe=`** can be used without positional **`subscripe`**. **`deprecationNotes`** only when legacy positional is used without **`subscribe`**. Mixin uses **`transaction.on_commit`** and **`after_delete`** (was **`before_delete`**). Optional **`CYPARTA_WS_EVENT_SERIALIZER`**, **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`**.
-- **v4.1.1** — Channel group names are validated (`validate_group_name`, `CYPARTA_WS_STRICT_GROUP_NAMES`). Prefer the `subscribe` keyword on `detect_register_group_status` / `register_group` over `subscripe`; `extensions.cyparta` now includes `subscribe` (and still mirrors `subscripe`). A second `connection_init` on one socket closes with **4429**.
-- **v4.1.0** — No bundled **`MyModel`**, package **`schema`**, or **`0001_initial`** migration; define models and **`GRAPHENE["SCHEMA"]`** in your project (or use **`examples/`** from a git checkout).
-- **RxPY removed** — delivery uses a bounded queue + sender task.
-- **Adapter settings removed** — no `CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER`, `CYPARTA_LEGACY_SUBSCRIPTION_DATA`, or `adapt_channel_event`.
-- **Register / unregister acks (v4.0.2+)** — restored as **`data: null`** + **`extensions.cyparta`** on the outbox (not mixed into Option B **`data`**). **`complete`** still ends an operation. (Unchanged in v4.1.0.)
-- **Subscribe must include `id`**; **`connection_init`** before **`subscribe`** is enforced (**`4401`** if violated).
-- **Payload data** uses **`{ responseKey: ... }`** (alias-aware) for live subscription events.
+The consumer reads **`scope["user"]`** for **`CYPARTA_WS_REQUIRE_AUTH`** and for **`CYPARTA_WS_GROUP_PERMISSION_CLASS`**.
+
+Wrap WebSocket URLs in **`AuthMiddlewareStack`** so Channels populates **`user`** (see Quick start).
+
+**Token in query string or header:** implement thin ASGI middleware that copies **`scope`**, resolves **`user`** (e.g. with **`channels.db.database_sync_to_async`**), sets **`scope["user"]`**, then delegates to the inner application. Compose it with **`AuthMiddlewareStack`** according to whether you still need session/cookie auth; see the [Channels authentication docs](https://channels.readthedocs.io/en/stable/topics/authentication.html).
+
+Example sketch (query param `?token=...` — replace lookup with your **`Authorization: Token <key>`** parsing if you use headers):
+
+```python
+# articles/middleware.py
+from urllib.parse import parse_qs
+
+from channels.db import database_sync_to_async
+from django.contrib.auth.models import AnonymousUser
+
+
+@database_sync_to_async
+def user_for_token(key: str):
+    if not key:
+        return AnonymousUser()
+    from rest_framework.authtoken.models import Token
+
+    try:
+        return Token.objects.select_related("user").get(key=key).user
+    except Token.DoesNotExist:
+        return AnonymousUser()
+
+
+class QueryStringTokenMiddleware:
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            query = parse_qs(scope.get("query_string", b"").decode())
+            token = (query.get("token") or [None])[0]
+            scope = dict(scope)
+            scope["user"] = await user_for_token(token)
+        return await self.inner(scope, receive, send)
+```
+
+For **`Authorization: Token <key>`**, decode **`dict(scope["headers"])`** (byte keys/values), find **`b"authorization"`**, strip the **`Token`** prefix, and resolve the user the same way.
 
 ---
 
-## Links
+## Payload filtering (`requested_fields`)
 
-- [Django Channels installation](https://channels.readthedocs.io/en/latest/installation.html)
-- [Channel layers](https://channels.readthedocs.io/en/latest/topics/channel_layers.html)
+When **`trigger_subscription`** sends a **dict** whose **`fields`** value is itself a **dict** (the usual shape for serialized **`Model`** instances), the consumer can narrow **`fields`** to the keys the client selected on the subscription field.
+
+- Pass **`requested_field` names** as a list of strings from the subscription resolver (see Articles example).
+- If **`requested_fields`** is **`None`** or empty, or the payload has no dict **`fields`**, the payload is returned **unchanged**.
+- Filtering **never mutates** the original dict; clients still receive top-level keys like **`pk`** unchanged when only **`fields`** is subset.
+
+---
+
+## Troubleshooting
+
+| Symptom | What to check |
+|--------|----------------|
+| Socket connects but subscription does nothing | **`connection_init`** must run before **`subscribe`** / **`start`**. Confirm **`GRAPHENE["SCHEMA"]`**, subscription field names, and **`group_send`** group strings match **`register_group`** names exactly. |
+| Close **1002** right after connect | Unsupported or missing **`Sec-WebSocket-Protocol`**. Client must request **`graphql-transport-ws`** or **`graphql-ws`**. |
+| Close **4401** | **`subscribe`** / **`start`** sent before **`connection_ack`** (init not completed). |
+| Close **4429** | Duplicate **`connection_init`** on the same WebSocket. |
+| Close **4413** | Outbox overflow with **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY = "close_connection"`**; client is too slow or **`CYPARTA_WS_OUTBOX_MAXSIZE`** is too small for your burst rate. |
+| No event after **`trigger_subscription`** | No subscriber in that **exact** group name; **`channel_layer`** / Redis misconfiguration; serialization dropped the event (**`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**); invalid group name skipped or raised per **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`**. |
+
+---
+
+## Upgrade notes
+
+- **v4.1.4** — **`drop_oldest`** calls **`task_done()`** after discarding the oldest queue item (consistent unfinished count for **`join()`**). **`close_connection`** schedules at most one disconnect per socket. **`_safe_passthrough`** stringifies dict keys for JSON-safe payloads. README and test extras refined (**`pytest-django`** for DB tests).
+- **v4.1.3** — Cached **`CYPARTA_WS_EVENT_SERIALIZER`** import; **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**; **`get_subscription_payload(action)`** on the mixin; per-group **`try`/`except`** around publishes; **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`**.
+- **v4.1.2** — Prefer **`subscribe=`** without positional **`subscripe`**; mixin publishes **`on_commit`**; **`after_delete`** for deletes; optional event serializer and **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`**.
+- **v4.1.1** — **`validate_group_name`** / **`GroupNameInvalid`**; **`subscribe`** kwarg on register helpers; duplicate **`connection_init`** closes with **4429**.
+- **v4.1.0** — **Breaking:** removed in-package demo model and **`CypartaGraphqlSubscriptionsTools.schema`**; define **`Query` / `Subscription` / schema`** in your project. Permission class is dotted path + **`has_permission`** instance API. All-or-nothing group registration per call. **`filter_requested_fields`** does not mutate inputs.
+
+---
+
+## License
+
+MIT — see **`LICENSE`**.
