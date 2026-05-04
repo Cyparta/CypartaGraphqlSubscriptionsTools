@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections import defaultdict
 from contextlib import suppress
@@ -10,11 +11,9 @@ from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from django.conf import settings
 from graphene_django.settings import graphene_settings
-from graphql import ExecutionResult, parse
+from graphql import ExecutionResult, GraphQLError, parse
 from graphql.language import OperationType
 from graphql.language.ast import FieldNode, OperationDefinitionNode
-
-from CypartaGraphqlSubscriptionsTools.models import *
 
 from .utils import filter_requested_fields
 
@@ -207,6 +206,8 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
     - Subscriptions keyed by GraphQL transport ``id`` (``_ops`` / ``_group_ops``).
     - Live events use Option B: ``data = { "<responseKey>": serialized_value }``
       (response key = field alias or field name).
+    - Group join permission: ``can_subscribe_to_group`` (``CYPARTA_WS_REQUIRE_AUTH``,
+      optional ``CYPARTA_WS_GROUP_PERMISSION_CLASS`` with ``has_permission``).
     """
 
     outbound_dropped_total: int = 0
@@ -267,6 +268,66 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         await self._teardown_connection_resources()
         await super().disconnect(close_code)
 
+    async def _invoke_has_permission(
+        self, perm, user, group_name, operation_id, scope, variables
+    ) -> bool:
+        """Call ``perm.has_permission``; supports sync or async implementation."""
+        meth = getattr(perm, "has_permission", None)
+        if meth is None:
+            return False
+        if asyncio.iscoroutinefunction(meth):
+            return bool(
+                await meth(user, group_name, operation_id, scope, variables)
+            )
+        result = meth(user, group_name, operation_id, scope, variables)
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+
+    async def can_subscribe_to_group(
+        self,
+        group_name: str,
+        operation_id: str | None = None,
+        variables: dict | None = None,
+    ) -> bool:
+        """
+        Return whether this socket may join ``group_name`` for the given operation.
+
+        - ``CYPARTA_WS_REQUIRE_AUTH`` (default ``True``): deny if ``scope["user"]`` is
+          missing or anonymous.
+        - If ``CYPARTA_WS_REQUIRE_AUTH`` is ``False`` and no permission class is set,
+          allow (after the auth gate above).
+        - If ``CYPARTA_WS_GROUP_PERMISSION_CLASS`` is set (dotted path), an instance is
+          created and ``await``-compatible ``has_permission(self, user, group_name,
+          operation_id=None, scope=None, variables=None)`` is used; deny if it returns
+          false.
+        """
+        variables = variables if isinstance(variables, dict) else {}
+        require_auth = getattr(settings, "CYPARTA_WS_REQUIRE_AUTH", True)
+        user = self.scope.get("user")
+        if require_auth:
+            if user is None or getattr(user, "is_anonymous", True):
+                return False
+
+        from django.utils.module_loading import import_string
+
+        class_path = str(getattr(settings, "CYPARTA_WS_GROUP_PERMISSION_CLASS", "") or "").strip()
+        if not class_path:
+            return True
+
+        perm_cls = import_string(class_path)
+        perm = perm_cls()
+        if not hasattr(perm, "has_permission"):
+            logger.error(
+                "CYPARTA_WS_GROUP_PERMISSION_CLASS %r has no has_permission method",
+                class_path,
+            )
+            return False
+
+        return await self._invoke_has_permission(
+            perm, user, group_name, operation_id, self.scope, variables
+        )
+
     async def _teardown_connection_resources(self) -> None:
         if getattr(self, "_sender_task", None) is not None:
             self._sender_task.cancel()
@@ -286,10 +347,15 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         subscripe=True,
         requested_fields=None,
         operation_id=None,
+        variables=None,
     ):
         if subscripe:
             await self.register_group(
-                name_list, subscripe, requested_fields, operation_id=operation_id
+                name_list,
+                subscripe,
+                requested_fields,
+                operation_id=operation_id,
+                variables=variables,
             )
         else:
             await self.un_register_group(
@@ -302,6 +368,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         subscripe,
         requested_fields=None,
         operation_id=None,
+        variables=None,
     ):
         if not subscripe:
             await self.un_register_group(
@@ -329,14 +396,46 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
 
         self.requested_fields = state.requested_fields
 
+        if variables is not None:
+            variables_effective = dict(variables) if variables else {}
+        else:
+            active = getattr(self, "_active_subscribe_variables", None)
+            variables_effective = dict(active) if isinstance(active, dict) and active else {}
+
+        denied_any = False
         for name in name_list:
             if name not in state.groups:
+                if not await self.can_subscribe_to_group(
+                    name, operation_id=op_id, variables=variables_effective
+                ):
+                    denied_any = True
+                    logger.warning(
+                        "websocket subscription group access denied operation_id=%s",
+                        op_id,
+                    )
+                    continue
                 state.groups.add(name)
                 await self.channel_layer.group_add(name, self.channel_name)
             self._group_ops[name].add(op_id)
 
         self.name = name_list[-1] if name_list else None
         self.groups = {g: True for g in state.groups}
+
+        registered_groups_ack = [n for n in name_list if n in state.groups]
+
+        if denied_any:
+            self._enqueue(
+                op_id,
+                ExecutionResult(
+                    data=None,
+                    errors=[
+                        GraphQLError(
+                            "Not authorized to subscribe to one or more subscription channels."
+                        )
+                    ],
+                    extensions=None,
+                ),
+            )
 
         self._enqueue(
             op_id,
@@ -345,7 +444,7 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
                 errors=None,
                 extensions={
                     "cyparta": {
-                        "registeredGroups": list(name_list),
+                        "registeredGroups": registered_groups_ack,
                         "subscripe": subscripe,
                         "action": "register",
                     }
@@ -398,6 +497,28 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         del self._ops[op_id]
         await self.send_json({"type": "complete", "id": op_id})
 
+    async def send_operation_error(
+        self, operation_id, message: str, code: str | None = None
+    ) -> None:
+        """
+        Send a subscription ``error`` frame for this socket's protocol.
+
+        - **graphql-transport-ws** (``subscribe``): ``payload`` is an array of error objects.
+        - **graphql-ws** legacy (``start``): ``payload`` is a single error object (Apollo-style).
+        """
+        if operation_id is None:
+            logger.warning("send_operation_error called without operation_id")
+            return
+        oid = str(operation_id)
+        err: dict = {"message": message}
+        if code is not None:
+            err["extensions"] = {"code": str(code)}
+
+        if self.start_command == "subscribe":
+            await self.send_json({"id": oid, "type": "error", "payload": [err]})
+        else:
+            await self.send_json({"id": oid, "type": "error", "payload": err})
+
     async def execute_subscription(
         self,
         query: str,
@@ -410,6 +531,9 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         op_id = self._resolve_operation_id(operation_id)
         self._active_operation_id = op_id
         self._active_subscription_field_name = subscription_field_name
+        self._active_subscribe_variables = (
+            dict(variables) if isinstance(variables, dict) and variables else {}
+        )
         try:
             schema = graphene_settings.SCHEMA
             result = await sync_to_async(schema.execute)(
@@ -426,55 +550,157 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         finally:
             self._active_operation_id = None
             self._active_subscription_field_name = None
+            self._active_subscribe_variables = None
 
     async def receive_json(self, request):
-        self.name = None
-        message_type = request.get("type")
-
-        if message_type == "connection_init":
-            await self.send_json({"type": "connection_ack"})
-            self._connection_acknowledged = True
-
-        elif message_type == "subscribe":
-            if not getattr(self, "_connection_acknowledged", False):
-                await self.close(code=4401)
-                return
-            operation_id = request.get("id")
-            if operation_id is None:
-                logger.warning("subscribe message missing id")
-                return
-            operation_id = str(operation_id)
-            payload = request["payload"]
-            variables = payload.get("variables")
-            operation_name = payload.get("operationName")
-            context = AttrDict(self.scope)
-            query = payload["query"]
-
-            field_key = resolve_subscription_response_key(query, operation_name)
-            if field_key is None:
-                logger.error(
-                    "subscribe rejected: could not resolve subscription response key"
+        try:
+            if not isinstance(request, dict):
+                logger.warning(
+                    "graphql-ws message ignored: expected JSON object, got %s",
+                    type(request).__name__,
                 )
                 return
 
-            await self.execute_subscription(
-                query,
-                operation_name,
-                variables,
-                context,
-                operation_id,
-                field_key,
-            )
+            self.name = None
+            message_type = request.get("type")
 
-        elif message_type == "complete":
-            if request.get("id") is not None:
-                await self._complete_operation(request.get("id"))
+            if message_type == "connection_init":
+                await self.send_json({"type": "connection_ack"})
+                self._connection_acknowledged = True
 
-        else:
-            logger.warning(
-                "unknown or unsupported graphql-ws message type: %r",
-                message_type,
-            )
+            elif message_type == self.start_command:
+                if not getattr(self, "_connection_acknowledged", False):
+                    await self.close(code=4401)
+                    return
+                operation_id = request.get("id")
+                if operation_id is None:
+                    logger.warning("%s message missing id", self.start_command)
+                    return
+                operation_id = str(operation_id)
+
+                if "payload" not in request or request["payload"] is None:
+                    logger.warning(
+                        "%s message missing payload operation_id=%s",
+                        self.start_command,
+                        operation_id,
+                    )
+                    await self.send_operation_error(
+                        operation_id,
+                        "Invalid message: missing payload.",
+                        code="INVALID_MESSAGE",
+                    )
+                    return
+
+                payload = request["payload"]
+                if not isinstance(payload, dict):
+                    logger.warning(
+                        "%s payload must be an object operation_id=%s",
+                        self.start_command,
+                        operation_id,
+                    )
+                    await self.send_operation_error(
+                        operation_id,
+                        "Invalid message: payload must be an object.",
+                        code="INVALID_MESSAGE",
+                    )
+                    return
+
+                if "query" not in payload:
+                    logger.warning(
+                        "%s payload missing query operation_id=%s",
+                        self.start_command,
+                        operation_id,
+                    )
+                    await self.send_operation_error(
+                        operation_id,
+                        "Invalid message: missing query.",
+                        code="INVALID_MESSAGE",
+                    )
+                    return
+
+                query = payload.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    logger.warning(
+                        "%s payload query must be a non-empty string operation_id=%s",
+                        self.start_command,
+                        operation_id,
+                    )
+                    await self.send_operation_error(
+                        operation_id,
+                        "Invalid message: query must be a non-empty string.",
+                        code="INVALID_MESSAGE",
+                    )
+                    return
+
+                if "variables" in payload:
+                    variables = payload["variables"]
+                    if variables is not None and not isinstance(variables, dict):
+                        logger.warning(
+                            "%s variables must be an object or null operation_id=%s",
+                            self.start_command,
+                            operation_id,
+                        )
+                        await self.send_operation_error(
+                            operation_id,
+                            "Invalid message: variables must be an object or null.",
+                            code="INVALID_MESSAGE",
+                        )
+                        return
+                else:
+                    variables = None
+
+                if "operationName" in payload:
+                    operation_name = payload["operationName"]
+                    if operation_name is not None and not isinstance(operation_name, str):
+                        logger.warning(
+                            "%s operationName must be a string or null operation_id=%s",
+                            self.start_command,
+                            operation_id,
+                        )
+                        await self.send_operation_error(
+                            operation_id,
+                            "Invalid message: operationName must be a string or null.",
+                            code="INVALID_MESSAGE",
+                        )
+                        return
+                else:
+                    operation_name = None
+
+                context = AttrDict(self.scope)
+
+                field_key = resolve_subscription_response_key(query, operation_name)
+                if field_key is None:
+                    logger.error(
+                        "subscribe rejected: could not resolve subscription response key operation_id=%s",
+                        operation_id,
+                    )
+                    await self.send_operation_error(
+                        operation_id,
+                        "Invalid subscription document.",
+                        code="INVALID_QUERY",
+                    )
+                    return
+
+                await self.execute_subscription(
+                    query,
+                    operation_name,
+                    variables,
+                    context,
+                    operation_id,
+                    field_key,
+                )
+
+            elif message_type == self.end_command:
+                if request.get("id") is not None:
+                    await self._complete_operation(request.get("id"))
+
+            else:
+                logger.warning(
+                    "unknown or unsupported graphql-ws message type: %r",
+                    message_type,
+                )
+        except Exception:
+            logger.exception("receive_json failed unexpectedly")
 
     def _shallow_copy_event_value(self, raw):
         if isinstance(raw, dict):

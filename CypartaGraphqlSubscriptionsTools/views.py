@@ -1,24 +1,15 @@
-
 from django.views.decorators.csrf import csrf_exempt
-from rest_framework.permissions import AllowAny
-
-from rest_framework.decorators import api_view,permission_classes,throttle_classes
-
-
+from graphene_django.settings import graphene_settings
 from graphene_django.views import GraphQLView
-from CypartaGraphqlSubscriptionsTools.schema import schema # Import your GraphQL schema
-
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 
 
 @csrf_exempt
-@api_view(["GET","POST"])
+@api_view(["GET", "POST"])
 @permission_classes([AllowAny])
 def graphql_token_view(request):
-    print(request.body)
-    #print(schema)
-    # print(request)
-    #print(request.data)
-     #this line is very important he solve mis understand error but he solve is
-    #if request.user.is_authenticated:
+    """GraphiQL / HTTP GraphQL using ``GRAPHENE["SCHEMA"]`` from Django settings."""
+    schema = graphene_settings.SCHEMA
     return GraphQLView.as_view(graphiql=True, schema=schema)(request)
- 
+

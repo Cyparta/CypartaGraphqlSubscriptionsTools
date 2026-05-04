@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.1.0
+
+### Removed (breaking)
+
+- **Demo `MyModel`** and **`CypartaGraphqlSubscriptionsTools/migrations/0001_initial`** — the installable app no longer defines concrete models or ships migrations for them.
+- **`CypartaGraphqlSubscriptionsTools.schema`** — removed; define schema in your project (see **`examples/basic_django_app/schema.py`** in the repo).
+- **`consumers`** no longer imports **`CypartaGraphqlSubscriptionsTools.models`**.
+
+### Changed
+
+- **`views.graphql_token_view`** uses **`graphene_settings.SCHEMA`** from **`GRAPHENE["SCHEMA"]`** instead of importing a package-level schema module.
+- **`setup.py`** lists explicit packages only (core app + migrations); **`examples/`** and **`tests/`** are not installed as top-level site-packages.
+- **`CYPARTA_WS_GROUP_PERMISSION_CLASS`** — load a class by dotted path, **instantiate** it, and call **`has_permission(self, user, group_name, operation_id=None, scope=None, variables=None)`** (sync or async). **`CYPARTA_WS_GROUP_PERMISSION_CALLBACK`** and static **`can_subscribe_to_group`** on the permission class are no longer used.
+
 ## 4.0.2
 
 ### Added

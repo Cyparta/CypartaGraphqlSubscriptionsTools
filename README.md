@@ -6,7 +6,7 @@ For background on the two protocols, see [GraphQL over WebSockets: subscription-
 
 ---
 
-## What you get (v4.0.2)
+## What you get (v4.1.0)
 
 - **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`).
 - **Multi-operation aware** — each client `subscribe` uses a transport **`id`**; groups and payloads are keyed per operation (`_ops` / `_group_ops`).
@@ -32,6 +32,18 @@ Or from source:
 ```bash
 pip install -e .
 ```
+
+The wheel includes only **`CypartaGraphqlSubscriptionsTools`** (and its empty **`migrations`** package). It does **not** ship demo models, demo GraphQL schema, or the **`examples/`** tree—those live in the repository for reference when you clone the project.
+
+---
+
+## Your models and schema (production)
+
+1. **Models** — The library does **not** define tables. In your Django app (e.g. `myapp/models.py`), add normal models and optionally inherit **`CypartaSubscriptionModelMixin`** from **`CypartaGraphqlSubscriptionsTools.mixins`** so lifecycle hooks call **`trigger_subscription`** with the same group naming you use in subscription resolvers.
+
+2. **GraphQL schema** — Define **`Query`**, **`Subscription`**, and **`schema = graphene.Schema(...)`** in your project (e.g. **`myapp/schema.py`**). Point **`GRAPHENE["SCHEMA"]`** at that module. Subscription resolvers use **`async_to_sync(root.detect_register_group_status)(...)`** as documented below.
+
+3. **Demo copy-paste** — See **`examples/basic_django_app/`** in the repo for a minimal **`MyModel`** + **`schema.py`**. From a checkout you can add **`"examples.basic_django_app.apps.BasicDjangoAppConfig"`** to **`INSTALLED_APPS`** (see **`examples/README.md`**); this is not part of the PyPI wheel.
 
 ---
 
@@ -64,6 +76,13 @@ Optional:
 ```python
 # Max queued outbound messages per WebSocket before drops (default 256).
 CYPARTA_WS_OUTBOX_MAXSIZE = 512
+
+# Subscription group access (default: require authenticated scope["user"]).
+CYPARTA_WS_REQUIRE_AUTH = True
+# Optional dotted path to a class instantiated per check. It must define
+# has_permission(self, user, group_name, operation_id=None, scope=None, variables=None) -> bool
+# (method may be sync or async).
+# CYPARTA_WS_GROUP_PERMISSION_CLASS = "myapp.permissions.SubscriptionGroupPermission"
 ```
 
 Point **`ASGI_APPLICATION`** at your routing module (see below).
@@ -191,6 +210,7 @@ async_to_sync(root.detect_register_group_status)(
     subscripe,           # True = join groups, False = leave
     requested_fields,    # optional list of field names for payload filtering, or None
     operation_id=None,   # optional; omit during normal subscribe execution (uses active op id)
+    variables=None,      # optional; defaults to the subscribe payload variables from the consumer
 )
 ```
 
@@ -293,9 +313,10 @@ application = ProtocolTypeRouter({
 
 ## 9. Upgrading from older releases
 
+- **v4.1.0** — No bundled **`MyModel`**, package **`schema`**, or **`0001_initial`** migration; define models and **`GRAPHENE["SCHEMA"]`** in your project (or use **`examples/`** from a git checkout).
 - **RxPY removed** — delivery uses a bounded queue + sender task.
 - **Adapter settings removed** — no `CYPARTA_GRAPHQL_SUBSCRIPTION_ADAPTER`, `CYPARTA_LEGACY_SUBSCRIPTION_DATA`, or `adapt_channel_event`.
-- **Register / unregister acks (v4.0.2+)** — restored as **`data: null`** + **`extensions.cyparta`** on the outbox (not mixed into Option B **`data`**). **`complete`** still ends an operation.
+- **Register / unregister acks (v4.0.2+)** — restored as **`data: null`** + **`extensions.cyparta`** on the outbox (not mixed into Option B **`data`**). **`complete`** still ends an operation. (Unchanged in v4.1.0.)
 - **Subscribe must include `id`**; **`connection_init`** before **`subscribe`** is enforced (**`4401`** if violated).
 - **Payload data** uses **`{ responseKey: ... }`** (alias-aware) for live subscription events.
 
