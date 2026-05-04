@@ -30,22 +30,28 @@ class CypartaSubscriptionModelMixin(LifecycleModelMixin):
             return [f"{model_name}Deleted.{self.pk}"]
         return []
 
+    def get_subscription_payload(self, action: str):
+        """Value passed to ``trigger_subscription`` for each group (default: ``self``)."""
+        return self
+
     def _schedule_subscription_triggers(self, action: str) -> None:
         if not self.should_publish_subscription_event(action):
             return
         groups = list(self.get_subscription_group_names(action))
         if not groups:
             return
+        payload = self.get_subscription_payload(action)
 
         def _after_commit() -> None:
-            try:
-                for group in groups:
-                    async_to_sync(trigger_subscription)(group, self)
-            except Exception:
-                logger.exception(
-                    "subscription publish failed after_commit action=%s",
-                    action,
-                )
+            for group in groups:
+                try:
+                    async_to_sync(trigger_subscription)(group, payload)
+                except Exception:
+                    logger.exception(
+                        "subscription publish failed after_commit action=%s group=%s",
+                        action,
+                        group,
+                    )
 
         transaction.on_commit(_after_commit)
 

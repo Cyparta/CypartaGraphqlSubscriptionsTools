@@ -219,6 +219,8 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
     """
 
     outbound_dropped_total: int = 0
+    outbox_overflow_drop_oldest_total: int = 0
+    outbox_overflow_close_connection_total: int = 0
 
     async def connect(self):
         maxsize = int(getattr(settings, "CYPARTA_WS_OUTBOX_MAXSIZE", 256) or 256)
@@ -229,6 +231,8 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
         self._active_operation_id: str | None = None
         self._active_subscription_field_name: str | None = None
         self._outbound_dropped = 0
+        self._outbox_drop_oldest_count = 0
+        self._outbox_overflow_close_count = 0
         self.groups = {}
         self.requested_fields = None
         self.name = None
@@ -261,19 +265,76 @@ class CypartaGraphqlSubscriptionsConsumer(DetectWebSocketType):
             finally:
                 self._outbox.task_done()
 
-    def _enqueue(self, operation_id: str | None, result: ExecutionResult) -> None:
+    def _schedule_outbox_overflow_close(self) -> None:
         try:
-            self._outbox.put_nowait(
-                OutboundMessage(operation_id=operation_id, result=result)
-            )
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("outbox overflow close: no running event loop")
+            return
+
+        async def _close() -> None:
+            try:
+                await self.close(code=4413)
+            except Exception:
+                logger.exception("outbox overflow close failed")
+
+        loop.create_task(_close())
+
+    def _enqueue(self, operation_id: str | None, result: ExecutionResult) -> None:
+        raw = getattr(settings, "CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY", "drop_newest")
+        strategy = str(raw or "drop_newest").strip().lower().replace("-", "_")
+        if strategy not in ("drop_newest", "drop_oldest", "close_connection"):
+            strategy = "drop_newest"
+        msg = OutboundMessage(operation_id=operation_id, result=result)
+        try:
+            self._outbox.put_nowait(msg)
+            return
         except asyncio.QueueFull:
+            pass
+
+        if strategy == "drop_newest":
             self._outbound_dropped += 1
             type(self).outbound_dropped_total += 1
             logger.warning(
-                "subscription outbox full; dropped event operation_id=%s (per_connection=%s)",
+                "subscription outbox full (%s); dropped newest event operation_id=%s "
+                "(per_connection=%s)",
+                strategy,
                 operation_id,
                 self._outbound_dropped,
             )
+            return
+
+        if strategy == "drop_oldest":
+            dropped_one = False
+            try:
+                self._outbox.get_nowait()
+                dropped_one = True
+            except asyncio.QueueEmpty:
+                pass
+            if dropped_one:
+                type(self).outbox_overflow_drop_oldest_total += 1
+                self._outbox_drop_oldest_count += 1
+            try:
+                self._outbox.put_nowait(msg)
+                return
+            except asyncio.QueueFull:
+                self._outbound_dropped += 1
+                type(self).outbound_dropped_total += 1
+                logger.warning(
+                    "subscription outbox still full after drop_oldest; dropped newest "
+                    "operation_id=%s",
+                    operation_id,
+                )
+            return
+
+        type(self).outbox_overflow_close_connection_total += 1
+        self._outbox_overflow_close_count += 1
+        logger.warning(
+            "subscription outbox full (%s); scheduling socket close operation_id=%s",
+            strategy,
+            operation_id,
+        )
+        self._schedule_outbox_overflow_close()
 
     async def disconnect(self, close_code):
         await self._teardown_connection_resources()

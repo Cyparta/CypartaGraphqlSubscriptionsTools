@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.1.3
+
+### Added
+
+- **`CYPARTA_WS_EVENT_SERIALIZER` import cache** — dotted path is resolved once per path; use **`events.reset_event_serializer_cache()`** when settings change in tests or at runtime.
+- **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`** (default **`False`**) — when **`True`**, failed custom and default serialization skips **`group_send`**. Tuple (and nested) payloads in the safe fallback are normalized to lists. Clearer warnings when falling back after errors.
+- **`get_subscription_payload(action)`** on **`CypartaSubscriptionModelMixin`** — default **`self`**; **`trigger_subscription`** receives this value. After-commit publishes wrap each group in its own **`try`/`except`** so one failure does not block others.
+- **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** — **`drop_newest`** (default, prior behavior), **`drop_oldest`**, or **`close_connection`** (close with code **4413**). Class counters **`outbox_overflow_drop_oldest_total`**, **`outbox_overflow_close_connection_total`**, plus per-socket counters.
+
 ## 4.1.2
 
 ### Added

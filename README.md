@@ -6,14 +6,14 @@ For background on the two protocols, see [GraphQL over WebSockets: subscription-
 
 ---
 
-## What you get (v4.1.2)
+## What you get (v4.1.3)
 
-- **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`).
+- **Per-connection bounded outbox** — `asyncio.Queue` + one sender task (slow clients cannot queue unbounded work). Configure with `CYPARTA_WS_OUTBOX_MAXSIZE` (default `256`) and optional **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** (`drop_newest`, `drop_oldest`, or `close_connection` with close code **4413**).
 - **Multi-operation aware** — each client `subscribe` uses a transport **`id`**; groups and payloads are keyed per operation (`_ops` / `_group_ops`).
 - **Live payload shape** — each event is sent as GraphQL `ExecutionResult` data shaped as **`{ "<responseKey>": value }`**, where **response key** is the subscription root field’s **alias** if present, otherwise the **field name** (from `graphql.parse`).
 - **Register / unregister ack** — after joining or leaving groups, clients get a **`next`/`data`** message with **`data: null`** and **`extensions.cyparta`** (`action`, `registeredGroups`, **`subscribe`**, legacy **`subscripe`**, and **`deprecationNotes`** only when the legacy positional **`subscripe`** was used without **`subscribe=`**).
 - **Channel group names** — validated against Django Channels rules before **`group_add`** / **`group_discard`** / **`group_send`** (see **`validate_group_name`** in `utils.py`; **`CYPARTA_WS_STRICT_GROUP_NAMES`** defaults to **`True`**).
-- **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** schedules **`trigger_subscription`** on **`transaction.on_commit`** (no publish on rollback). Optional **`CYPARTA_WS_EVENT_SERIALIZER`** and **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`** for server-side publishes.
+- **Lifecycle helpers** — optional **`CypartaSubscriptionModelMixin`** schedules **`trigger_subscription`** on **`transaction.on_commit`** (no publish on rollback), per-group error isolation, and optional **`get_subscription_payload`**. Optional **`CYPARTA_WS_EVENT_SERIALIZER`** (cached by path), **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**, and **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`** for server-side publishes.
 
 ---
 
@@ -97,6 +97,12 @@ CYPARTA_WS_STRICT_GROUP_NAMES = True
 
 # If True, trigger_subscription raises GroupNameInvalid on bad group names (default False).
 # CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP = False
+
+# If True, skip group_send when both custom and default serialization fail (default False).
+# CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR = False
+
+# Outbox full policy: "drop_newest" (default), "drop_oldest", or "close_connection" (4413).
+# CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY = "drop_newest"
 ```
 
 Point **`ASGI_APPLICATION`** at your routing module (see below).
@@ -303,6 +309,9 @@ Optional hooks (override on your model):
 
 - **`should_publish_subscription_event(self, action: str) -> bool`** — `action` is **`"create"`**, **`"update"`**, or **`"delete"`**; return **`False`** to skip scheduling.
 - **`get_subscription_group_names(self, action: str) -> list[str]`** — default names: **`{ModelName}Created`**, **`{ModelName}Updated.{pk}`**, **`{ModelName}Deleted.{pk}`**.
+- **`get_subscription_payload(self, action: str)`** — value passed to **`trigger_subscription`** for each group (default **`self`**).
+
+When **`CYPARTA_WS_EVENT_SERIALIZER`** changes at runtime (e.g. in tests), call **`CypartaGraphqlSubscriptionsTools.events.reset_event_serializer_cache()`** so the new dotted path is loaded.
 
 ---
 
@@ -346,6 +355,7 @@ application = ProtocolTypeRouter({
 
 ## 9. Upgrading from older releases
 
+- **v4.1.3** — Serializer import caching; **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**; mixin **`get_subscription_payload`** and per-group publish **`try`/`except`**; **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`** for full outbox.
 - **v4.1.2** — **`subscribe=`** can be used without positional **`subscripe`**. **`deprecationNotes`** only when legacy positional is used without **`subscribe`**. Mixin uses **`transaction.on_commit`** and **`after_delete`** (was **`before_delete`**). Optional **`CYPARTA_WS_EVENT_SERIALIZER`**, **`CYPARTA_WS_RAISE_ON_INVALID_TRIGGER_GROUP`**.
 - **v4.1.1** — Channel group names are validated (`validate_group_name`, `CYPARTA_WS_STRICT_GROUP_NAMES`). Prefer the `subscribe` keyword on `detect_register_group_status` / `register_group` over `subscripe`; `extensions.cyparta` now includes `subscribe` (and still mirrors `subscripe`). A second `connection_init` on one socket closes with **4429**.
 - **v4.1.0** — No bundled **`MyModel`**, package **`schema`**, or **`0001_initial`** migration; define models and **`GRAPHENE["SCHEMA"]`** in your project (or use **`examples/`** from a git checkout).

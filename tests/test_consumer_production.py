@@ -186,6 +186,8 @@ async def test_disconnect_cancels_ping_no_websocket_close_json():
 async def test_queue_overflow_bounded():
     c = object.__new__(CypartaGraphqlSubscriptionsConsumer)
     CypartaGraphqlSubscriptionsConsumer.outbound_dropped_total = 0
+    CypartaGraphqlSubscriptionsConsumer.outbox_overflow_drop_oldest_total = 0
+    CypartaGraphqlSubscriptionsConsumer.outbox_overflow_close_connection_total = 0
     c._outbound_dropped = 0
     c._outbox = asyncio.Queue(maxsize=2)
     for i in range(2):
