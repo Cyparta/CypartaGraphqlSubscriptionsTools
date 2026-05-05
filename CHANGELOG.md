@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.1.7
+
+### Documentation
+
+- **README** — Step-by-step **WebSocket token authentication**: install/migrate DRF authtoken, full **`TokenAuthMiddleware`** **`asgi.py`**, create **`Token`**, browser **`WebSocket`** example with **`graphql-transport-ws`**, header/wscat, security notes; Quick start cross-link.
+
 ## 4.1.6
 
 ### Added

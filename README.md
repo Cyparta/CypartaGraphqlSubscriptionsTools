@@ -2,7 +2,7 @@
 
 ![CypartaGraphqlSubscriptionsTools cover](https://raw.githubusercontent.com/Cyparta/CypartaGraphqlSubscriptionsTools/main/cover.jpg)
 
-**Version 4.1.6**
+**Version 4.1.7**
 
 Graphene + Django **GraphQL subscriptions** over **Django Channels** (async WebSockets). The package ships a production-oriented consumer that speaks:
 
@@ -142,6 +142,8 @@ application = ProtocolTypeRouter(
 ```
 
 Set **`ASGI_APPLICATION = "myproject.asgi.application"`** in `settings.py`.
+
+To authenticate browsers or API clients with a **DRF token** on WebSockets (`?token=…` or **`Authorization: Token …`**), wrap the WebSocket stack with **`TokenAuthMiddleware`** as shown in **[WebSocket token authentication (DRF authtoken)](#websocket-token-authentication-drf-authtoken)**.
 
 ---
 
@@ -552,55 +554,132 @@ except GroupNameInvalid as exc:
 
 ## Authentication
 
-The consumer reads **`scope["user"]`** for **`CYPARTA_WS_REQUIRE_AUTH`** and for **`CYPARTA_WS_GROUP_PERMISSION_CLASS`**. Wrap WebSocket URLs in **`AuthMiddlewareStack`** when you use session/cookie-based auth (see Quick start).
+The consumer reads **`scope["user"]`** for **`CYPARTA_WS_REQUIRE_AUTH`** and for **`CYPARTA_WS_GROUP_PERMISSION_CLASS`**. You can rely on **session/cookie** auth only (`AuthMiddlewareStack` — see Quick start) or add **DRF token** auth for WebSockets with **`TokenAuthMiddleware`** below.
 
-### WebSocket token authentication
+### WebSocket token authentication (DRF authtoken)
 
-The **browser `WebSocket` API cannot set custom headers** (including **`Authorization`**), so clients in the browser must pass a token in the **query string**. **Header-based** `Authorization: Token <key>` remains supported for **non-browser** clients (e.g. **wscat**, **Postman**, **backend services**), tools that use a custom WebSocket stack, or native apps that can set headers.
+The **browser `WebSocket` API cannot set the `Authorization` header**, so **browser clients** should pass the API token in the **query string**. **Non-browser** clients (wscat, Postman, services) can use **`Authorization: Token <key>`** on the WebSocket handshake.
 
-This package provides **`CypartaGraphqlSubscriptionsTools.middleware.TokenAuthMiddleware`**, which:
+**`CypartaGraphqlSubscriptionsTools.middleware.TokenAuthMiddleware`**:
 
-- Resolves the token in this order: **`Authorization: Token <key>`** (highest priority), then query parameters **`token`**, **`auth`**, **`authToken`**, or **`accessToken`**.
-- Sets **`scope["user"]`** to the token’s user, or **`AnonymousUser()`** if the token is missing, invalid, or malformed input is ignored safely (no crashes on bad headers or query strings).
-- Uses **`Token.objects.select_related("user")`** (Django REST framework **authtoken**). Install **`djangorestframework`** in your project and add **`rest_framework`** and **`rest_framework.authtoken`** to **`INSTALLED_APPS`** (with migrations) when using this middleware.
+- Resolves the token in this order: **`Authorization: Token <key>`** (wins if present and valid), then query **`token`**, **`auth`**, **`authToken`**, **`accessToken`**.
+- Sets **`scope["user"]`**, or **`AnonymousUser()`** if missing/invalid; malformed header/query is ignored safely.
+- Uses **`rest_framework.authtoken.models.Token`** with **`select_related("user")`**.
 
-**Query string (typical in browsers)**
+#### 1) Install and enable DRF authtoken
 
-```text
-ws://127.0.0.1:8000/ws/graphql/?token=abc123
+```bash
+pip install djangorestframework
 ```
-
-Equivalent keys:
-
-```text
-?token=abc123
-?auth=abc123
-?authToken=abc123
-?accessToken=abc123
-```
-
-**Header (tools and services)**
-
-```http
-Authorization: Token abc123
-```
-
-If both header and query carry a token, the **header wins**.
-
-**ASGI wiring example**
 
 ```python
-from channels.auth import AuthMiddlewareStack
-from channels.routing import URLRouter
-
-from CypartaGraphqlSubscriptionsTools.middleware import TokenAuthMiddleware
-from myproject.routing import websocket_urlpatterns
-
-# Token runs first for WebSockets in this stack; adjust order vs AuthMiddlewareStack if you need sessions.
-application_websocket = TokenAuthMiddleware(AuthMiddlewareStack(URLRouter(websocket_urlpatterns)))
+# settings.py
+INSTALLED_APPS = [
+    # ...
+    "rest_framework",
+    "rest_framework.authtoken",
+    # ...
+]
 ```
 
-Place **`TokenAuthMiddleware`** only on your **WebSocket** stack inside **`ProtocolTypeRouter`** (see Quick start); HTTP traffic does not need it.
+```bash
+python manage.py migrate   # creates authtoken_token
+```
+
+#### 2) Wire ASGI: token middleware + session (optional) + WebSocket routes
+
+Use **`TokenAuthMiddleware`** on the **WebSocket** branch only. HTTP stays on **`get_asgi_application()`** as in Quick start.
+
+```python
+# asgi.py
+import os
+
+from channels.auth import AuthMiddlewareStack
+from channels.routing import ProtocolTypeRouter, URLRouter
+from django.core.asgi import get_asgi_application
+
+from CypartaGraphqlSubscriptionsTools.middleware import TokenAuthMiddleware
+from myproject.routing import websocket_urlpatterns  # your URLRouter patterns
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
+
+django_asgi_app = get_asgi_application()
+
+application = ProtocolTypeRouter(
+    {
+        "http": django_asgi_app,
+        "websocket": TokenAuthMiddleware(
+            AuthMiddlewareStack(URLRouter(websocket_urlpatterns))
+        ),
+    }
+)
+```
+
+`TokenAuthMiddleware` runs **first**; **`AuthMiddlewareStack`** can still fill **`user`** from the session for the same connection if you use cookies. If both apply, you may need a custom order or a single source of truth for **`user`** in your app.
+
+#### 3) Create a token for a user
+
+**Django admin:** Users → add **Token** for a user, or in a shell:
+
+```python
+from django.contrib.auth import get_user_model
+from rest_framework.authtoken.models import Token
+
+user = get_user_model().objects.get(username="alice")
+token, _ = Token.objects.get_or_create(user=user)
+print(token.key)  # pass this to the client (over HTTPS / WSS only in production)
+```
+
+Or expose your own REST endpoint that returns **`Token.objects.get_or_create`** after username/password login.
+
+#### 4) Browser client (query string — recommended)
+
+Build the WebSocket URL with the token. Request the GraphQL WebSocket **subprotocol** your server expects (**`graphql-transport-ws`** or **`graphql-ws`**).
+
+```javascript
+const TOKEN = "..."; // from your login API — never commit secrets
+const host = window.location.host;
+const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+const qs = new URLSearchParams({ token: TOKEN }).toString();
+
+const ws = new WebSocket(
+  `${proto}//${host}/ws/graphql/?${qs}`,
+  "graphql-transport-ws"
+);
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "connection_init" }));
+};
+
+ws.onmessage = (ev) => console.log(JSON.parse(ev.data));
+```
+
+Equivalent query keys: **`token`**, **`auth`**, **`authToken`**, **`accessToken`**.
+
+#### 5) CLI / tools (Authorization header)
+
+When the client can set handshake headers (Postman, custom scripts, some native stacks):
+
+```http
+GET ws://127.0.0.1:8000/ws/graphql/ HTTP/1.1
+Upgrade: websocket
+Sec-WebSocket-Protocol: graphql-transport-ws
+Authorization: Token abc123yourtokenhere
+```
+
+If both header and query include a token, the **header takes precedence**.
+
+Example with **wscat** (if your build forwards headers — otherwise use the **query-string URL** in the connect URL):
+
+```bash
+# Query string (works everywhere)
+wscat -c "ws://127.0.0.1:8000/ws/graphql/?token=YOUR_TOKEN" -s graphql-transport-ws
+```
+
+#### 6) Production notes
+
+- Prefer **`wss://`** and HTTPS so tokens are not sent in clear text.
+- Treat tokens like passwords: short TTL, revoke on logout, never log query strings with **`token=`** in access logs without redaction.
 
 ---
 
@@ -629,6 +708,7 @@ When **`trigger_subscription`** sends a **dict** whose **`fields`** value is its
 
 ## Upgrade notes
 
+- **v4.1.7** — **README**: expanded **WebSocket token authentication** — DRF setup, full **`asgi.py`**, creating tokens, browser JavaScript (`graphql-transport-ws`), headers/wscat, production notes; Quick start link to auth section.
 - **v4.1.6** — **`TokenAuthMiddleware`**: token from **`Authorization: Token …`** (priority) or query **`token`** / **`auth`** / **`authToken`** / **`accessToken`**; safe handling of malformed header/query; **`AnonymousUser`** when missing or invalid; **`select_related("user")`**. Requires **`djangorestframework`** + authtoken app for this middleware. Tests and **`[test]`** extra include **`djangorestframework`**.
 - **v4.1.5** — README overhaul (quick start, production settings, Articles example, permissions, serializers, clients, troubleshooting). Cover and architecture images; **`MANIFEST.in`** ships **`cover.jpg`** / **`graph.jpg`** with the sdist. PyPI-friendly image URLs in README.
 - **v4.1.4** — **`drop_oldest`** calls **`task_done()`** after discarding the oldest queue item (consistent unfinished count for **`join()`**). **`close_connection`** schedules at most one disconnect per socket. **`_safe_passthrough`** stringifies dict keys for JSON-safe payloads. README and test extras refined (**`pytest-django`** for DB tests).
