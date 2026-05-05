@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.1.6
+
+### Added
+
+- **`TokenAuthMiddleware`** (**`middleware.py`**) — authenticate WebSockets with **`Authorization: Token <key>`** (first) or query string **`token`**, **`auth`**, **`authToken`**, **`accessToken`**. Sets **`scope["user"]`** via **`Token.objects.select_related("user")`**, or **`AnonymousUser`** when absent/invalid. Tolerates malformed headers and query strings without raising.
+
+### Documentation
+
+- **README** — **WebSocket Authentication** section (browser vs header clients, examples, ASGI wiring).
+
+### Tooling
+
+- **`[test]`** extra includes **`djangorestframework`** for **`Token`** model tests.
+
 ## 4.1.5
 
 ### Documentation

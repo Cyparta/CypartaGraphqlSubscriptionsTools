@@ -5,6 +5,8 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
     "channels",
+    "rest_framework",
+    "rest_framework.authtoken",
     "CypartaGraphqlSubscriptionsTools",
     "tests.apps.TestsConfig",
 ]

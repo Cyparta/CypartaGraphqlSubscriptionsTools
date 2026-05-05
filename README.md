@@ -2,7 +2,7 @@
 
 ![CypartaGraphqlSubscriptionsTools cover](https://raw.githubusercontent.com/Cyparta/CypartaGraphqlSubscriptionsTools/main/cover.jpg)
 
-**Version 4.1.5**
+**Version 4.1.6**
 
 Graphene + Django **GraphQL subscriptions** over **Django Channels** (async WebSockets). The package ships a production-oriented consumer that speaks:
 
@@ -552,48 +552,55 @@ except GroupNameInvalid as exc:
 
 ## Authentication
 
-The consumer reads **`scope["user"]`** for **`CYPARTA_WS_REQUIRE_AUTH`** and for **`CYPARTA_WS_GROUP_PERMISSION_CLASS`**.
+The consumer reads **`scope["user"]`** for **`CYPARTA_WS_REQUIRE_AUTH`** and for **`CYPARTA_WS_GROUP_PERMISSION_CLASS`**. Wrap WebSocket URLs in **`AuthMiddlewareStack`** when you use session/cookie-based auth (see Quick start).
 
-Wrap WebSocket URLs in **`AuthMiddlewareStack`** so Channels populates **`user`** (see Quick start).
+### WebSocket token authentication
 
-**Token in query string or header:** implement thin ASGI middleware that copies **`scope`**, resolves **`user`** (e.g. with **`channels.db.database_sync_to_async`**), sets **`scope["user"]`**, then delegates to the inner application. Compose it with **`AuthMiddlewareStack`** according to whether you still need session/cookie auth; see the [Channels authentication docs](https://channels.readthedocs.io/en/stable/topics/authentication.html).
+The **browser `WebSocket` API cannot set custom headers** (including **`Authorization`**), so clients in the browser must pass a token in the **query string**. **Header-based** `Authorization: Token <key>` remains supported for **non-browser** clients (e.g. **wscat**, **Postman**, **backend services**), tools that use a custom WebSocket stack, or native apps that can set headers.
 
-Example sketch (query param `?token=...` — replace lookup with your **`Authorization: Token <key>`** parsing if you use headers):
+This package provides **`CypartaGraphqlSubscriptionsTools.middleware.TokenAuthMiddleware`**, which:
 
-```python
-# articles/middleware.py
-from urllib.parse import parse_qs
+- Resolves the token in this order: **`Authorization: Token <key>`** (highest priority), then query parameters **`token`**, **`auth`**, **`authToken`**, or **`accessToken`**.
+- Sets **`scope["user"]`** to the token’s user, or **`AnonymousUser()`** if the token is missing, invalid, or malformed input is ignored safely (no crashes on bad headers or query strings).
+- Uses **`Token.objects.select_related("user")`** (Django REST framework **authtoken**). Install **`djangorestframework`** in your project and add **`rest_framework`** and **`rest_framework.authtoken`** to **`INSTALLED_APPS`** (with migrations) when using this middleware.
 
-from channels.db import database_sync_to_async
-from django.contrib.auth.models import AnonymousUser
+**Query string (typical in browsers)**
 
-
-@database_sync_to_async
-def user_for_token(key: str):
-    if not key:
-        return AnonymousUser()
-    from rest_framework.authtoken.models import Token
-
-    try:
-        return Token.objects.select_related("user").get(key=key).user
-    except Token.DoesNotExist:
-        return AnonymousUser()
-
-
-class QueryStringTokenMiddleware:
-    def __init__(self, inner):
-        self.inner = inner
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "websocket":
-            query = parse_qs(scope.get("query_string", b"").decode())
-            token = (query.get("token") or [None])[0]
-            scope = dict(scope)
-            scope["user"] = await user_for_token(token)
-        return await self.inner(scope, receive, send)
+```text
+ws://127.0.0.1:8000/ws/graphql/?token=abc123
 ```
 
-For **`Authorization: Token <key>`**, decode **`dict(scope["headers"])`** (byte keys/values), find **`b"authorization"`**, strip the **`Token`** prefix, and resolve the user the same way.
+Equivalent keys:
+
+```text
+?token=abc123
+?auth=abc123
+?authToken=abc123
+?accessToken=abc123
+```
+
+**Header (tools and services)**
+
+```http
+Authorization: Token abc123
+```
+
+If both header and query carry a token, the **header wins**.
+
+**ASGI wiring example**
+
+```python
+from channels.auth import AuthMiddlewareStack
+from channels.routing import URLRouter
+
+from CypartaGraphqlSubscriptionsTools.middleware import TokenAuthMiddleware
+from myproject.routing import websocket_urlpatterns
+
+# Token runs first for WebSockets in this stack; adjust order vs AuthMiddlewareStack if you need sessions.
+application_websocket = TokenAuthMiddleware(AuthMiddlewareStack(URLRouter(websocket_urlpatterns)))
+```
+
+Place **`TokenAuthMiddleware`** only on your **WebSocket** stack inside **`ProtocolTypeRouter`** (see Quick start); HTTP traffic does not need it.
 
 ---
 
@@ -622,6 +629,7 @@ When **`trigger_subscription`** sends a **dict** whose **`fields`** value is its
 
 ## Upgrade notes
 
+- **v4.1.6** — **`TokenAuthMiddleware`**: token from **`Authorization: Token …`** (priority) or query **`token`** / **`auth`** / **`authToken`** / **`accessToken`**; safe handling of malformed header/query; **`AnonymousUser`** when missing or invalid; **`select_related("user")`**. Requires **`djangorestframework`** + authtoken app for this middleware. Tests and **`[test]`** extra include **`djangorestframework`**.
 - **v4.1.5** — README overhaul (quick start, production settings, Articles example, permissions, serializers, clients, troubleshooting). Cover and architecture images; **`MANIFEST.in`** ships **`cover.jpg`** / **`graph.jpg`** with the sdist. PyPI-friendly image URLs in README.
 - **v4.1.4** — **`drop_oldest`** calls **`task_done()`** after discarding the oldest queue item (consistent unfinished count for **`join()`**). **`close_connection`** schedules at most one disconnect per socket. **`_safe_passthrough`** stringifies dict keys for JSON-safe payloads. README and test extras refined (**`pytest-django`** for DB tests).
 - **v4.1.3** — Cached **`CYPARTA_WS_EVENT_SERIALIZER`** import; **`CYPARTA_WS_DROP_EVENT_ON_SERIALIZATION_ERROR`**; **`get_subscription_payload(action)`** on the mixin; per-group **`try`/`except`** around publishes; **`CYPARTA_WS_OUTBOX_OVERFLOW_STRATEGY`**.

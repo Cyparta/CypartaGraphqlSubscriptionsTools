@@ -42,6 +42,7 @@ tests/test_package_import.py
 tests/test_receive_json_validation.py
 tests/test_subscribe_first_class.py
 tests/test_subscribe_kwarg_and_groups.py
+tests/test_token_auth_middleware.py
 tests/test_trigger_invalid_raise.py
 tests/test_ws_permissions.py
 tests/migrations/0001_initial.py
